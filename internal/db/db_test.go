@@ -228,3 +228,49 @@ func TestAddTagsToBookmark_Idempotent(t *testing.T) {
 		t.Fatalf("second AddTagsToBookmark failed: %v", err)
 	}
 }
+
+func TestSearch_Default(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	CreateBookmark(database, "https://coolors.co", "Coolors - Color palette generator", "color tools", "coolors.co")
+	CreateBookmark(database, "https://example.com", "Example Site", "nothing special", "example.com")
+
+	results, total, err := Search(database, "color", false, 5, 0)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if total == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+	if results[0].Title != "Coolors - Color palette generator" {
+		t.Errorf("unexpected first result: %s", results[0].Title)
+	}
+}
+
+func TestSearch_DetailedMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://coolors.co", "Coolors", "color tools", "coolors.co")
+	AddTagsToBookmark(database, bm.ID, []string{"design", "color"})
+
+	results, _, err := Search(database, "color", true, 5, 0)
+	if err != nil {
+		t.Fatalf("Search detailed failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+	if results[0].Tags == "" {
+		t.Error("detailed mode should include tags")
+	}
+}
