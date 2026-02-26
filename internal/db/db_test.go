@@ -72,3 +72,159 @@ func TestOpen_IdempotentMigration(t *testing.T) {
 	}
 	defer db2.Close()
 }
+
+func TestCreateBookmark(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, err := CreateBookmark(database, "https://example.com", "Example", "A test site", "example.com")
+	if err != nil {
+		t.Fatalf("CreateBookmark failed: %v", err)
+	}
+
+	if bm.ID == "" {
+		t.Error("bookmark ID should not be empty")
+	}
+	if bm.URL != "https://example.com" {
+		t.Errorf("expected URL 'https://example.com', got '%s'", bm.URL)
+	}
+	if bm.Title != "Example" {
+		t.Errorf("expected title 'Example', got '%s'", bm.Title)
+	}
+}
+
+func TestCreateBookmark_DuplicateURL(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	_, err = CreateBookmark(database, "https://example.com", "Example", "", "")
+	if err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+
+	// 重复 URL 应报错
+	_, err = CreateBookmark(database, "https://example.com", "Example 2", "", "")
+	if err == nil {
+		t.Fatal("expected error for duplicate URL, got nil")
+	}
+}
+
+func TestToggleFavorite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+
+	if bm.IsFavorite {
+		t.Error("new bookmark should not be favorite")
+	}
+
+	isFav, err := ToggleFavorite(database, bm.ID)
+	if err != nil {
+		t.Fatalf("ToggleFavorite failed: %v", err)
+	}
+	if !isFav {
+		t.Error("expected favorite after first toggle")
+	}
+
+	isFav, err = ToggleFavorite(database, bm.ID)
+	if err != nil {
+		t.Fatalf("ToggleFavorite failed: %v", err)
+	}
+	if isFav {
+		t.Error("expected not favorite after second toggle")
+	}
+}
+
+func TestIncrementClickCount(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+
+	count, err := IncrementClickCount(database, bm.ID)
+	if err != nil {
+		t.Fatalf("IncrementClickCount failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected click_count=1, got %d", count)
+	}
+}
+
+func TestDeleteBookmark(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+
+	err = DeleteBookmark(database, bm.ID)
+	if err != nil {
+		t.Fatalf("DeleteBookmark failed: %v", err)
+	}
+
+	got, err := GetBookmarkByID(database, bm.ID)
+	if err != nil {
+		t.Fatalf("GetBookmarkByID failed: %v", err)
+	}
+	if got != nil {
+		t.Error("bookmark should be deleted")
+	}
+}
+
+func TestAddTagsToBookmark(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+
+	err = AddTagsToBookmark(database, bm.ID, []string{"design", "color palette"})
+	if err != nil {
+		t.Fatalf("AddTagsToBookmark failed: %v", err)
+	}
+
+	updated, _ := GetBookmarkByID(database, bm.ID)
+	if updated.TagsText == "" {
+		t.Error("tags_text should not be empty after adding tags")
+	}
+}
+
+func TestAddTagsToBookmark_Idempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+
+	_ = AddTagsToBookmark(database, bm.ID, []string{"design"})
+	err = AddTagsToBookmark(database, bm.ID, []string{"design", "tool"})
+	if err != nil {
+		t.Fatalf("second AddTagsToBookmark failed: %v", err)
+	}
+}
