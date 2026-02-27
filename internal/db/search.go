@@ -1,7 +1,7 @@
 // cli/internal/db/search.go
 
-// search.go 负责 FTS5 全文搜索查询。
-// 始终 LEFT JOIN tags 表，返回完整的书签信息（含标签）。
+// search.go 负责全部搜索逻辑：FTS5 全文搜索、CJK LIKE 回退。
+// 所有查询始终 LEFT JOIN tags 表，返回完整的书签信息（含标签）。
 
 package db
 
@@ -9,7 +9,19 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode"
 )
+
+// containsCJK 检测字符串是否包含中文字符（unicode.Han）。
+// 用于判断搜索查询是否需要走 LIKE fallback 而非 FTS5。
+func containsCJK(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
 
 // searchSQL 是 FTS5 搜索查询（含 tags）。
 const searchSQL = `
@@ -104,6 +116,51 @@ LIMIT ? OFFSET ?`, whereClause)
 
 		queryArgs := append(args, limit, offset)
 		rows, err = db.Query(querySQL, queryArgs...)
+	} else if containsCJK(query) {
+		// CJK LIKE fallback — FTS5 默认 tokenizer 按空格分词，不支持中文子串搜索。
+		// 中文查询改用 LIKE '%query%' 全表扫描，50K 行 < 50ms。
+		// 参考：docs/researches/cjk-fts5-search.md
+		likePattern := "%" + query + "%"
+		var wheres []string
+		var args []any
+
+		wheres = append(wheres, "(b.title LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.site_name LIKE ? OR b.tags_text LIKE ?)")
+		args = append(args, likePattern, likePattern, likePattern, likePattern, likePattern)
+
+		if since != "" {
+			wheres = append(wheres, "b.created_at >= ?")
+			args = append(args, since)
+		}
+		if favOnly {
+			wheres = append(wheres, "b.is_favorite = 1")
+		}
+		if tag != "" {
+			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+			args = append(args, tag)
+		}
+
+		whereClause := "WHERE " + strings.Join(wheres, " AND ")
+
+		countQ := "SELECT COUNT(*) FROM bookmarks b " + whereClause
+		if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
+			return nil, 0, fmt.Errorf("count query failed: %w", err)
+		}
+
+		querySQL := fmt.Sprintf(`
+SELECT b.id, b.url, b.title, b.site_name,
+       b.click_count, b.is_favorite, b.note, b.description,
+       b.source, b.created_at,
+       COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
+FROM bookmarks b
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN tags t ON bt.tag_id = t.id
+%s
+GROUP BY b.id
+ORDER BY b.created_at DESC
+LIMIT ? OFFSET ?`, whereClause)
+
+		queryArgs := append(args, limit, offset)
+		rows, err = db.Query(querySQL, queryArgs...)
 	} else {
 		// FTS5 全文搜索
 		var extraConds string
@@ -184,7 +241,7 @@ LIMIT ? OFFSET ?`, extraConds)
 	return results, total, nil
 }
 
-// RandomBookmark returns a random bookmark matching the given filters.
+// RandomBookmark 返回符合筛选条件的随机书签。无匹配时返回 nil。
 func RandomBookmark(database *sql.DB, since string, favOnly bool, tag string) (*Bookmark, error) {
 	var wheres []string
 	var args []any
