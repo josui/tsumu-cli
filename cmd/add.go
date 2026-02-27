@@ -9,6 +9,8 @@ import (
 	neturl "net/url"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/josui/tsumu-cli/internal/db"
 	"github.com/josui/tsumu-cli/internal/meta"
 )
@@ -17,6 +19,20 @@ var (
 	addTags string
 	addNote string
 )
+
+var addCmd = &cobra.Command{
+	Use:   "add <url> [note...]",
+	Short: "Add a bookmark",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		url := args[0]
+		note := addNote
+		if note == "" {
+			note = strings.Join(args[1:], " ")
+		}
+		return runAdd(url, note, addTags)
+	},
+}
 
 func init() {
 	addCmd.Flags().StringVarP(&addTags, "tags", "t", "", "comma-separated tags")

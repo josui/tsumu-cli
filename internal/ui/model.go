@@ -379,7 +379,7 @@ func (m Model) doOpen() tea.Cmd {
 			return openResultMsg{err: fmt.Errorf("no bookmark selected")}
 		}
 
-		if err := openBrowser(bm.URL); err != nil {
+		if err := OpenBrowser(bm.URL); err != nil {
 			return openResultMsg{err: err}
 		}
 
@@ -463,7 +463,7 @@ func (m Model) View() string {
 			header = "tsumu"
 		}
 	} else {
-		header = fmt.Sprintf("tsumu find %s", m.query)
+		header = fmt.Sprintf("tsumu %s", m.query)
 	}
 	pageInfo := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
 	cw := m.contentWidth()
@@ -614,7 +614,7 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-2]) + ".."
 }
 
-func openBrowser(url string) error {
+func OpenBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":

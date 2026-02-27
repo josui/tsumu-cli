@@ -1,7 +1,4 @@
-// cli/cmd/search.go
-
-// search.go 实现 tsumu -s <query> 搜索命令。
-// 查询数据库后启动 bubbletea TUI 展示交互式搜索结果。
+// search.go contains runSearch which starts the bubbletea TUI.
 
 package cmd
 

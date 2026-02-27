@@ -183,3 +183,52 @@ LIMIT ? OFFSET ?`, extraConds)
 
 	return results, total, nil
 }
+
+// RandomBookmark returns a random bookmark matching the given filters.
+func RandomBookmark(database *sql.DB, since string, favOnly bool, tag string) (*Bookmark, error) {
+	var wheres []string
+	var args []any
+	if since != "" {
+		wheres = append(wheres, "b.created_at >= ?")
+		args = append(args, since)
+	}
+	if favOnly {
+		wheres = append(wheres, "b.is_favorite = 1")
+	}
+	if tag != "" {
+		wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+		args = append(args, tag)
+	}
+
+	whereClause := ""
+	if len(wheres) > 0 {
+		whereClause = "WHERE " + strings.Join(wheres, " AND ")
+	}
+
+	q := fmt.Sprintf(`
+SELECT b.id, b.url, b.title, b.site_name,
+       b.click_count, b.is_favorite, b.note, b.description,
+       b.source, b.created_at,
+       COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
+FROM bookmarks b
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN tags t ON bt.tag_id = t.id
+%s
+GROUP BY b.id
+ORDER BY RANDOM()
+LIMIT 1`, whereClause)
+
+	var bm Bookmark
+	err := database.QueryRow(q, args...).Scan(
+		&bm.ID, &bm.URL, &bm.Title, &bm.SiteName,
+		&bm.ClickCount, &bm.IsFavorite, &bm.Note, &bm.Description,
+		&bm.Source, &bm.CreatedAt, &bm.Tags,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("random query failed: %w", err)
+	}
+	return &bm, nil
+}
