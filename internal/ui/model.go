@@ -53,7 +53,9 @@ type Model struct {
 
 	cursor int       // 当前光标位置（全局索引，0-based）
 	mode   inputMode // 当前输入模式
-	input  string    // 标签输入缓冲区（仅 modeTag 时使用）
+	input  string    // 输入缓冲区（modeTag / modeNote 时使用）
+	inputPos int     // 输入光标位置（rune 单位，0 = 最左端）
+	blinkID  int     // 闪烁代次，递增后旧定时器自动失效
 
 	favOnly bool   // 仅显示收藏
 	since   string // 时间筛选（ISO 时间字符串）
@@ -115,17 +117,25 @@ type actionResultMsg struct {
 
 // editorFinishedMsg is sent when the external editor process exits
 type editorFinishedMsg struct {
-	note string
-	err  error
+	bookmarkID string // 编辑器启动前捕获，避免返回后光标漂移
+	note       string
+	err        error
 }
 
-// cursorBlinkMsg 触发光标闪烁
-type cursorBlinkMsg struct{}
+// cursorBlinkMsg 触发光标闪烁，携带 blinkID 用于过滤过期定时器
+type cursorBlinkMsg struct{ id int }
 
-func cursorBlink() tea.Cmd {
+func cursorBlink(id int) tea.Cmd {
 	return tea.Tick(530*time.Millisecond, func(time.Time) tea.Msg {
-		return cursorBlinkMsg{}
+		return cursorBlinkMsg{id: id}
 	})
+}
+
+// resetBlink 递增 blinkID 使旧定时器失效，重置光标可见，启动新闪烁周期
+func (m *Model) resetBlink() tea.Cmd {
+	m.blinkID++
+	m.cursorVisible = true
+	return cursorBlink(m.blinkID)
 }
 
 // ============================================================
@@ -226,12 +236,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = true
 			return m, nil
 		}
-		return m, m.doUpdateNote(msg.note)
+		return m, m.doUpdateNoteByID(msg.bookmarkID, msg.note)
 
 	case cursorBlinkMsg:
+		// 只处理当前代次的定时器，旧的自动丢弃
+		if msg.id != m.blinkID {
+			return m, nil
+		}
 		if m.mode == modeTag || m.mode == modeNote {
 			m.cursorVisible = !m.cursorVisible
-			return m, cursorBlink()
+			return m, cursorBlink(m.blinkID)
 		}
 		return m, nil
 
@@ -259,9 +273,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeConfirm:
 		return m.handleConfirmKey(key)
 	case modeTag:
-		return m.handleTagKey(key)
+		return m.handleTagKey(msg)
 	case modeNote:
-		return m.handleNoteKey(key)
+		return m.handleNoteKey(msg)
 	default:
 		return m.handleNormalKey(key)
 	}
@@ -324,9 +338,9 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 		if bm := m.focusedBookmark(); bm != nil {
 			m.mode = modeTag
 			m.input = ""
+			m.inputPos = 0
 			m.message = ""
-			m.cursorVisible = true
-			return m, cursorBlink()
+			return m, m.resetBlink()
 		}
 		return m, nil
 
@@ -335,16 +349,16 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 		if bm := m.focusedBookmark(); bm != nil {
 			m.mode = modeNote
 			m.input = bm.Note // 预填充已有 note
+			m.inputPos = len([]rune(bm.Note))
 			m.message = ""
-			m.cursorVisible = true
-			return m, cursorBlink()
+			return m, m.resetBlink()
 		}
 		return m, nil
 
 	// 用外部编辑器编辑 note
 	case keyNoteEditor:
 		if bm := m.focusedBookmark(); bm != nil {
-			return m, m.doEditNoteExternal(bm.Note)
+			return m, m.doEditNoteExternal(bm.ID, bm.Note)
 		}
 		return m, nil
 	}
@@ -364,20 +378,20 @@ func (m Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 }
 
 // handleTagKey 处理标签输入模式的按键
-func (m Model) handleTagKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case keyEsc:
-		// 取消标签输入
+func (m Model) handleTagKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEscape:
 		m.mode = modeNormal
 		m.input = ""
+		m.inputPos = 0
 		m.message = ""
 		return m, nil
 
-	case keyEnter:
-		// 提交标签
+	case tea.KeyEnter:
 		m.mode = modeNormal
 		tagStr := strings.TrimSpace(m.input)
 		m.input = ""
+		m.inputPos = 0
 
 		if tagStr == "" {
 			m.message = "Tags cannot be empty"
@@ -400,53 +414,84 @@ func (m Model) handleTagKey(key string) (tea.Model, tea.Cmd) {
 
 		return m, m.doAddTags(tags)
 
-	case "backspace":
-		if len(m.input) > 0 {
-			// 处理多字节字符（中文等）
-			runes := []rune(m.input)
-			m.input = string(runes[:len(runes)-1])
-		}
-		return m, nil
-
 	default:
-		// 累积输入字符：接受单字节 ASCII 和 IME 输入的多字节字符（中文等）
-		// ASCII 控制序列（tab/up/f1 等）全由 <0x80 字节组成，首字节 >= 0x80 必为 UTF-8
-		if len(key) > 0 && (len(key) == 1 || key[0] >= 0x80) {
-			m.input += key
-		}
-		return m, nil
+		return m.handleTextInput(msg)
 	}
 }
 
 // handleNoteKey 处理 note 输入模式的按键
-func (m Model) handleNoteKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case keyEsc:
+func (m Model) handleNoteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEscape:
 		m.mode = modeNormal
 		m.input = ""
+		m.inputPos = 0
 		m.message = ""
 		return m, nil
 
-	case keyEnter:
+	case tea.KeyEnter:
 		m.mode = modeNormal
 		note := strings.TrimSpace(m.input)
 		m.input = ""
+		m.inputPos = 0
 		return m, m.doUpdateNote(note)
 
-	case "backspace":
-		if len(m.input) > 0 {
-			runes := []rune(m.input)
-			m.input = string(runes[:len(runes)-1])
-		}
-		return m, nil
-
 	default:
-		// 累积输入字符：接受单字节 ASCII 和 IME 输入的多字节字符（中文等）
-		if len(key) > 0 && (len(key) == 1 || key[0] >= 0x80) {
-			m.input += key
-		}
-		return m, nil
+		return m.handleTextInput(msg)
 	}
+}
+
+// handleTextInput 处理文本输入的通用逻辑（光标移动、删除、字符插入）
+// 任何操作都重置光标为可见并重启闪烁计时器，避免操作瞬间光标消失。
+func (m Model) handleTextInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	runes := []rune(m.input)
+
+	switch msg.Type {
+	case tea.KeyBackspace:
+		if m.inputPos > 0 {
+			m.input = string(runes[:m.inputPos-1]) + string(runes[m.inputPos:])
+			m.inputPos--
+		}
+
+	case tea.KeyDelete:
+		if m.inputPos < len(runes) {
+			m.input = string(runes[:m.inputPos]) + string(runes[m.inputPos+1:])
+		}
+
+	case tea.KeyLeft:
+		if m.inputPos > 0 {
+			m.inputPos--
+		}
+
+	case tea.KeyRight:
+		if m.inputPos < len(runes) {
+			m.inputPos++
+		}
+
+	case tea.KeyHome, tea.KeyCtrlA:
+		m.inputPos = 0
+
+	case tea.KeyEnd, tea.KeyCtrlE:
+		m.inputPos = len(runes)
+
+	case tea.KeyCtrlK:
+		m.input = string(runes[:m.inputPos])
+
+	case tea.KeyCtrlU:
+		m.input = string(runes[m.inputPos:])
+		m.inputPos = 0
+
+	case tea.KeyRunes:
+		newRunes := make([]rune, 0, len(runes)+len(msg.Runes))
+		newRunes = append(newRunes, runes[:m.inputPos]...)
+		newRunes = append(newRunes, msg.Runes...)
+		newRunes = append(newRunes, runes[m.inputPos:]...)
+		m.input = string(newRunes)
+		m.inputPos += len(msg.Runes)
+	}
+
+	// 每次操作都重置光标可见 + 重启闪烁（旧定时器自动失效）
+	return m, m.resetBlink()
 }
 
 // ============================================================
@@ -525,8 +570,10 @@ func (m Model) doUpdateNote(note string) tea.Cmd {
 	if bm == nil {
 		return nil
 	}
-	id := bm.ID
+	return m.doUpdateNoteByID(bm.ID, note)
+}
 
+func (m Model) doUpdateNoteByID(id string, note string) tea.Cmd {
 	return func() tea.Msg {
 		if err := db.UpdateNote(m.db, id, note); err != nil {
 			return actionResultMsg{message: fmt.Sprintf("Note update failed: %v", err), isError: true}
@@ -538,20 +585,22 @@ func (m Model) doUpdateNote(note string) tea.Cmd {
 	}
 }
 
-// resolveEditor returns the editor command from $EDITOR, with fallbacks.
-func resolveEditor() string {
+// resolveEditor returns the editor command and arguments from $EDITOR, with fallbacks.
+// Supports $EDITOR values like "code --wait" or "vim".
+func resolveEditor() (string, []string) {
 	if editor := os.Getenv("EDITOR"); editor != "" {
-		return editor
+		parts := strings.Fields(editor)
+		return parts[0], parts[1:]
 	}
 	for _, name := range []string{"vim", "vi", "nano"} {
 		if _, err := exec.LookPath(name); err == nil {
-			return name
+			return name, nil
 		}
 	}
-	return "vi"
+	return "vi", nil
 }
 
-func (m Model) doEditNoteExternal(currentNote string) tea.Cmd {
+func (m Model) doEditNoteExternal(bookmarkID string, currentNote string) tea.Cmd {
 	f, err := os.CreateTemp("", "tsumu-note-*.txt")
 	if err != nil {
 		return func() tea.Msg {
@@ -569,8 +618,9 @@ func (m Model) doEditNoteExternal(currentNote string) tea.Cmd {
 	}
 	f.Close()
 
-	editor := resolveEditor()
-	c := exec.Command(editor, tmpFile)
+	editorCmd, editorArgs := resolveEditor()
+	args := append(editorArgs, tmpFile)
+	c := exec.Command(editorCmd, args...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -587,7 +637,7 @@ func (m Model) doEditNoteExternal(currentNote string) tea.Cmd {
 			return editorFinishedMsg{err: fmt.Errorf("read temp file: %w", readErr)}
 		}
 
-		return editorFinishedMsg{note: strings.TrimSpace(string(content))}
+		return editorFinishedMsg{bookmarkID: bookmarkID, note: strings.TrimSpace(string(content))}
 	})
 }
 
@@ -666,20 +716,28 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
-	// 输入光标
-	cursor := " "
-	if m.cursorVisible {
-		cursor = "█"
-	}
-
-	// 标签输入提示
-	if m.mode == modeTag {
-		b.WriteString(fmt.Sprintf("  tags> %s%s\n", m.input, cursor))
-	}
-
-	// Note 输入提示
-	if m.mode == modeNote {
-		b.WriteString(fmt.Sprintf("  note> %s%s\n", m.input, cursor))
+	// 输入行（tags / note）
+	if m.mode == modeTag || m.mode == modeNote {
+		runes := []rune(m.input)
+		before := string(runes[:m.inputPos])
+		after := ""
+		// 光标位置的字符用反色渲染，末尾时显示空格
+		cursorChar := " "
+		if m.inputPos < len(runes) {
+			cursorChar = string(runes[m.inputPos])
+			after = string(runes[m.inputPos+1:])
+		}
+		var cursor string
+		if m.cursorVisible {
+			cursor = inputCursorStyle.Render(cursorChar)
+		} else {
+			cursor = cursorChar
+		}
+		label := "tags"
+		if m.mode == modeNote {
+			label = "note"
+		}
+		b.WriteString(fmt.Sprintf("  %s> %s%s%s\n", label, before, cursor, after))
 	}
 
 	// 操作提示

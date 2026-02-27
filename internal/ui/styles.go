@@ -33,4 +33,5 @@ var (
 	helpStyle         = lipgloss.NewStyle().Foreground(colorDim)
 	headerStyle       = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
 	tagStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DAEA3"))
+	inputCursorStyle  = lipgloss.NewStyle().Reverse(true) // 输入光标：反色显示
 )
