@@ -5,5 +5,8 @@ tm
 # Internal docs
 docs/
 
+# Claude Code
+.claude/settings.json
+
 # macOS
 .DS_Store

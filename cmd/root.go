@@ -45,7 +45,6 @@ Usage:
   tsumu add <url> [note...]      add bookmark
   tsumu add -t <tags> <url>      add bookmark with tags
   tsumu find <query>             search bookmarks
-  tsumu find -d <query>          search (detailed)
   tsumu fav                      list favorites
   tsumu update                   update to latest version
   tsumu sync                     sync with Turso cloud

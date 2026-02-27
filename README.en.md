@@ -6,6 +6,14 @@ Local-first CLI bookmark manager. Save links fast, find them faster.
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install josui/tap/tsumu
+```
+
+### From source
+
 ```bash
 make install
 ```
@@ -25,8 +33,13 @@ make build
 ```
 tsumu                          list all bookmarks (TUI)
 tsumu add <url> [note...]      add bookmark
+tsumu add <url> -t a,b -n "x"  add bookmark with tags and note
 tsumu find <query>             search bookmarks
-tsumu find -d <query>          search (detailed mode)
+tsumu fav                      list favorite bookmarks
+tsumu --today                  bookmarks added today
+tsumu --week                   bookmarks added this week
+tsumu --month                  bookmarks added this month
+tsumu update                   update to latest version
 ```
 
 ### Add a bookmark
@@ -49,22 +62,14 @@ Opens an interactive TUI with search results.
 
 | Key | Action |
 |-----|--------|
-| `{n}` + Enter | Open bookmark #n in browser |
-| `t{n} tag1,tag2` + Enter | Add tags to bookmark #n |
-| `f{n}` + Enter | Toggle favorite on bookmark #n |
-| `d{n}` + Enter | Delete bookmark #n (with confirmation) |
-| `j` | Next page |
-| `k` | Previous page |
-| `Esc` | Clear input |
+| `j` / `↓` | Move cursor down |
+| `k` / `↑` | Move cursor up |
+| `Enter` | Open selected bookmark in browser |
+| `t` | Add tags to selected bookmark |
+| `f` | Toggle favorite on selected bookmark |
+| `d` | Delete selected bookmark (with confirmation) |
+| `Esc` | Clear message |
 | `q` | Quit |
-
-### Detailed mode
-
-```bash
-tsumu find -d design
-```
-
-Shows URL, description, tags, creation date, click count, and source.
 
 ### Cloud sync
 
@@ -82,7 +87,7 @@ Data is stored in `~/.tsumu/`:
 - `tsumu.db` — SQLite database (WAL mode, FTS5 full-text search)
 - `config.toml` — Configuration file (auto-created)
 
-The database schema is shared with [tsumu macOS app](https://github.com/josui/tsumu) via Turso cloud sync.
+The database uses SQLite (WAL mode, FTS5 full-text search) with optional Turso cloud sync across devices.
 
 ## Tech Stack
 

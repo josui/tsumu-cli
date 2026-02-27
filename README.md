@@ -6,6 +6,14 @@
 
 ## 安装
 
+### Homebrew
+
+```bash
+brew install josui/tap/tsumu
+```
+
+### 源码编译
+
 ```bash
 make install
 ```
@@ -25,8 +33,13 @@ make build
 ```
 tsumu                          列出所有书签（TUI）
 tsumu add <url> [备注...]      添加书签
+tsumu add <url> -t a,b -n "x"  添加书签（含标签和备注）
 tsumu find <query>             搜索书签
-tsumu find -d <query>          搜索（详细模式）
+tsumu fav                      列出收藏书签
+tsumu --today                  今天添加的书签
+tsumu --week                   最近一周的书签
+tsumu --month                  最近一个月的书签
+tsumu update                   更新到最新版本
 ```
 
 ### 添加书签
@@ -49,22 +62,14 @@ tsumu find design
 
 | 按键 | 操作 |
 |------|------|
-| `{n}` + Enter | 在浏览器中打开第 n 个书签 |
-| `t{n} tag1,tag2` + Enter | 给第 n 个书签添加标签 |
-| `f{n}` + Enter | 切换第 n 个书签的收藏状态 |
-| `d{n}` + Enter | 删除第 n 个书签（需确认） |
-| `j` | 下一页 |
-| `k` | 上一页 |
-| `Esc` | 清空输入 |
+| `j` / `↓` | 下移光标 |
+| `k` / `↑` | 上移光标 |
+| `Enter` | 在浏览器中打开选中书签 |
+| `t` | 给选中书签添加标签 |
+| `f` | 切换选中书签的收藏状态 |
+| `d` | 删除选中书签（需确认） |
+| `Esc` | 清除消息 |
 | `q` | 退出 |
-
-### 详细模式
-
-```bash
-tsumu find -d design
-```
-
-显示 URL、描述、标签、创建时间、点击次数和来源。
 
 ### 云端同步
 
@@ -82,7 +87,7 @@ tsumu sync --off         # 关闭同步
 - `tsumu.db` — SQLite 数据库（WAL 模式，FTS5 全文搜索）
 - `config.toml` — 配置文件（自动创建）
 
-数据库 schema 通过 Turso 云端同步与 [tsumu macOS app](https://github.com/josui/tsumu) 共享。
+数据库使用 SQLite（WAL 模式，FTS5 全文搜索），通过 Turso 支持多设备云端同步。
 
 ## 技术栈
 
