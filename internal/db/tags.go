@@ -11,6 +11,63 @@ import (
 	"strings"
 )
 
+// ListAllTags returns all tag names sorted alphabetically.
+func ListAllTags(database *sql.DB) ([]string, error) {
+	rows, err := database.Query(`SELECT name FROM tags ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list tags failed: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan tag failed: %w", err)
+		}
+		tags = append(tags, name)
+	}
+	return tags, rows.Err()
+}
+
+// SetBookmarkTags replaces all tags on a bookmark with the given list.
+// Removes old associations, creates new tags as needed, then syncs tags_text.
+func SetBookmarkTags(database *sql.DB, bookmarkID string, tagNames []string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction failed: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Remove all existing tag associations
+	if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id = ?`, bookmarkID); err != nil {
+		return fmt.Errorf("clear tags failed: %w", err)
+	}
+
+	// Add new tags
+	for _, name := range tagNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		tagID, err := getOrCreateTag(tx, name)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)`,
+			bookmarkID, tagID,
+		); err != nil {
+			return fmt.Errorf("link tag to bookmark failed: %w", err)
+		}
+	}
+
+	if err := syncTagsText(tx, bookmarkID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // AddTagsToBookmark 给书签添加标签。
 // tagNames 是标签名列表（如 ["design", "color palette"]）。
 // 标签不存在时自动创建，已关联的标签不会重复关联。

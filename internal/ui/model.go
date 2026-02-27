@@ -21,6 +21,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/josui/tsumu-cli/internal/db"
 )
@@ -67,6 +68,11 @@ type Model struct {
 
 	syncStatus string // sync 状态文本（header 显示用）
 	width      int    // 终端宽度
+
+	// Tag autocomplete
+	allTags     []string // all existing tags (loaded on modeTag entry)
+	suggestions []string // current matching suggestions
+	selectedSug int      // selected suggestion index
 }
 
 // NewModel 创建并初始化 Model。
@@ -134,6 +140,45 @@ func cursorBlink(id int) tea.Cmd {
 	return tea.Tick(530*time.Millisecond, func(time.Time) tea.Msg {
 		return cursorBlinkMsg{id: id}
 	})
+}
+
+// tagsLoadedMsg is sent when all tags have been loaded from the database
+type tagsLoadedMsg struct {
+	tags []string
+	err  error
+}
+
+func (m Model) doLoadAllTags() tea.Cmd {
+	return func() tea.Msg {
+		tags, err := db.ListAllTags(m.db)
+		return tagsLoadedMsg{tags: tags, err: err}
+	}
+}
+
+// computeSuggestions filters allTags by prefix match on the current token.
+// Returns up to 5 matches.
+func computeSuggestions(allTags []string, token string) []string {
+	if token == "" {
+		return nil
+	}
+	token = strings.ToLower(token)
+
+	var result []string
+	for _, tag := range allTags {
+		if strings.HasPrefix(strings.ToLower(tag), token) {
+			result = append(result, tag)
+			if len(result) >= 5 {
+				break
+			}
+		}
+	}
+	return result
+}
+
+// currentTagToken extracts the tag token currently being typed (after last comma).
+func currentTagToken(input string) string {
+	parts := strings.Split(input, ",")
+	return strings.TrimSpace(parts[len(parts)-1])
 }
 
 // resetBlink 递增 blinkID 使旧定时器失效，重置光标可见，启动新闪烁周期
@@ -243,6 +288,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.doUpdateNoteByID(msg.bookmarkID, msg.note)
 
+	case tagsLoadedMsg:
+		if msg.err == nil {
+			m.allTags = msg.tags
+		}
+		return m, nil
+
 	case cursorBlinkMsg:
 		// 只处理当前代次的定时器，旧的自动丢弃
 		if msg.id != m.blinkID {
@@ -338,14 +389,19 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// 进入标签输入模式
+	// 进入标签输入模式（预填充已有 tag + 异步加载全部 tag 用于 autocomplete）
 	case keyTag:
 		if bm := m.focusedBookmark(); bm != nil {
 			m.mode = modeTag
-			m.input = ""
-			m.inputPos = 0
+			m.input = bm.Tags // 预加载已有 tag（逗号分隔）
+			if m.input != "" {
+				m.input += ", "
+			}
+			m.inputPos = len([]rune(m.input))
 			m.message = ""
-			return m, m.resetBlink()
+			m.suggestions = nil
+			m.selectedSug = 0
+			return m, tea.Batch(m.resetBlink(), m.doLoadAllTags())
 		}
 		return m, nil
 
@@ -382,7 +438,7 @@ func (m Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleTagKey 处理标签输入模式的按键
+// handleTagKey 处理标签输入模式的按键（含 autocomplete 逻辑）
 func (m Model) handleTagKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEscape:
@@ -390,6 +446,8 @@ func (m Model) handleTagKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input = ""
 		m.inputPos = 0
 		m.message = ""
+		m.suggestions = nil
+		m.selectedSug = 0
 		return m, nil
 
 	case tea.KeyEnter:
@@ -397,6 +455,8 @@ func (m Model) handleTagKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		tagStr := strings.TrimSpace(m.input)
 		m.input = ""
 		m.inputPos = 0
+		m.suggestions = nil
+		m.selectedSug = 0
 
 		if tagStr == "" {
 			m.message = "Tags cannot be empty"
@@ -417,10 +477,51 @@ func (m Model) handleTagKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		return m, m.doAddTags(tags)
+		return m, m.doSetTags(tags)
+
+	case tea.KeyTab:
+		// Accept selected suggestion
+		if len(m.suggestions) > 0 && m.selectedSug < len(m.suggestions) {
+			selected := m.suggestions[m.selectedSug]
+			parts := strings.Split(m.input, ",")
+			if len(parts) == 1 {
+				parts[0] = selected
+			} else {
+				parts[len(parts)-1] = " " + selected
+			}
+			m.input = strings.Join(parts, ",") + ", "
+			m.inputPos = len([]rune(m.input))
+			m.suggestions = nil
+			m.selectedSug = 0
+			return m, m.resetBlink()
+		}
+		return m, nil
+
+	case tea.KeyUp:
+		if len(m.suggestions) > 0 {
+			m.selectedSug--
+			if m.selectedSug < 0 {
+				m.selectedSug = len(m.suggestions) - 1
+			}
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		if len(m.suggestions) > 0 {
+			m.selectedSug++
+			if m.selectedSug >= len(m.suggestions) {
+				m.selectedSug = 0
+			}
+		}
+		return m, nil
 
 	default:
-		return m.handleTextInput(msg)
+		model, cmd := m.handleTextInput(msg)
+		m2 := model.(Model)
+		token := currentTagToken(m2.input)
+		m2.suggestions = computeSuggestions(m2.allTags, token)
+		m2.selectedSug = 0
+		return m2, cmd
 	}
 }
 
@@ -485,6 +586,15 @@ func (m Model) handleTextInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlU:
 		m.input = string(runes[m.inputPos:])
 		m.inputPos = 0
+
+	case tea.KeySpace:
+		// 空格作为普通字符插入
+		newRunes := make([]rune, 0, len(runes)+1)
+		newRunes = append(newRunes, runes[:m.inputPos]...)
+		newRunes = append(newRunes, ' ')
+		newRunes = append(newRunes, runes[m.inputPos:]...)
+		m.input = string(newRunes)
+		m.inputPos++
 
 	case tea.KeyRunes:
 		newRunes := make([]rune, 0, len(runes)+len(msg.Runes))
@@ -555,7 +665,7 @@ func (m Model) doToggleFavorite() tea.Cmd {
 	}
 }
 
-func (m Model) doAddTags(tags []string) tea.Cmd {
+func (m Model) doSetTags(tags []string) tea.Cmd {
 	bm := m.focusedBookmark()
 	if bm == nil {
 		return nil
@@ -563,7 +673,7 @@ func (m Model) doAddTags(tags []string) tea.Cmd {
 	id := bm.ID
 
 	return func() tea.Msg {
-		if err := db.AddTagsToBookmark(m.db, id, tags); err != nil {
+		if err := db.SetBookmarkTags(m.db, id, tags); err != nil {
 			return actionResultMsg{message: fmt.Sprintf("Tag failed: %v", err), isError: true}
 		}
 		return actionResultMsg{message: fmt.Sprintf("✓ Tagged: %s", strings.Join(tags, ", "))}
@@ -746,6 +856,22 @@ func (m Model) View() string {
 			label = "note"
 		}
 		b.WriteString(fmt.Sprintf("  %s> %s%s%s\n", label, before, cursor, after))
+
+		// Render suggestion dropdown (only in tag mode)
+		// Align suggestion text with the current token start position
+		if m.mode == modeTag && len(m.suggestions) > 0 {
+			token := currentTagToken(m.input)
+			tokenCol := 8 + stringWidth(m.input) - stringWidth(token) // 8 = len("  tags> ")
+			selPad := strings.Repeat(" ", max(tokenCol-2, 0))         // "→ " is 2 cols, place before token
+			normPad := strings.Repeat(" ", tokenCol)
+			for i, sug := range m.suggestions {
+				if i == m.selectedSug {
+					b.WriteString(selPad + suggestSelStyle.Render("→ "+sug) + "\n")
+				} else {
+					b.WriteString(normPad + suggestStyle.Render(sug) + "\n")
+				}
+			}
+		}
 	}
 
 	// 操作提示
@@ -788,7 +914,7 @@ func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 	// 右侧内容（domain + clicks），计算可见宽度
 	domainText := truncate(bm.SiteName, 15)
 	clicksText := fmt.Sprintf("×%d", bm.ClickCount)
-	rightWidth := len([]rune(domainText)) + 2 + len(clicksText) // domain + "  " + clicks
+	rightWidth := stringWidth(domainText) + 2 + len(clicksText) // domain + "  " + clicks
 
 	// Title 填满剩余空间
 	titleMax := cw - prefixWidth - rightWidth - 2 // 2 = title 与右侧的间距
@@ -805,7 +931,7 @@ func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 	}
 
 	// 用空格填充 title 到固定宽度，使右侧对齐
-	titlePad := titleMax - len([]rune(titleText))
+	titlePad := titleMax - stringWidth(titleText)
 	if titlePad < 0 {
 		titlePad = 0
 	}
@@ -842,12 +968,18 @@ func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 // 辅助函数
 // ============================================================
 
-func truncate(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
+// stringWidth returns the display width of a string, accounting for CJK double-width characters.
+func stringWidth(s string) int {
+	return runewidth.StringWidth(s)
+}
+
+// truncate truncates a string to fit within maxWidth display columns.
+// Uses display width (CJK chars = 2 columns) instead of rune count.
+func truncate(s string, maxWidth int) string {
+	if runewidth.StringWidth(s) <= maxWidth {
 		return s
 	}
-	return string(runes[:maxLen-2]) + ".."
+	return runewidth.Truncate(s, maxWidth, "..")
 }
 
 func OpenBrowser(url string) error {
