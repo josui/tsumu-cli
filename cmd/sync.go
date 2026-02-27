@@ -67,6 +67,10 @@ func runSyncManual() error {
 	if err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
+
+	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
+	Cfg.Save()
+
 	fmt.Printf("  Synced (%d frames)\n", rep.FramesSynced)
 	return nil
 }
@@ -135,7 +139,7 @@ func runSyncSetup() error {
 	syncOpts := &db.SyncOpts{
 		PrimaryURL: url,
 		AuthToken:  token,
-		Interval:   60 * time.Second,
+		Interval:   0,
 	}
 	newStore, err := db.OpenStore(dbPath, syncOpts)
 	if err != nil {
@@ -177,6 +181,8 @@ func runSyncSetup() error {
 	Cfg.Sync.URL = url
 	Cfg.Sync.AuthToken = token
 	Cfg.Sync.Enabled = true
+	Cfg.Sync.Interval = "24h"
+	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -192,14 +198,41 @@ func runSyncStatus() error {
 		return nil
 	}
 
+	interval := Cfg.Sync.Interval
+	if interval == "" {
+		interval = "24h"
+	}
+
 	fmt.Printf("  Status:  enabled\n")
 	fmt.Printf("  Remote:  %s\n", Cfg.Sync.URL)
-	if Store.IsSynced() {
-		fmt.Printf("  Mode:    auto (every 60s)\n")
+	fmt.Printf("  Mode:    lazy (every %s)\n", interval)
+
+	if Cfg.Sync.LastSynced != "" {
+		last, err := time.Parse(time.RFC3339, Cfg.Sync.LastSynced)
+		if err == nil {
+			fmt.Printf("  Last:    %s (%s)\n", formatDuration(time.Since(last)), last.Local().Format("2006-01-02 15:04"))
+		}
 	} else {
-		fmt.Printf("  Mode:    configured but not active (restart to activate)\n")
+		fmt.Printf("  Last:    never\n")
 	}
 	return nil
+}
+
+// formatDuration 将 Duration 格式化为人类可读的相对时间。
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		return fmt.Sprintf("%dh ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		return fmt.Sprintf("%dd ago", days)
+	}
 }
 
 // runSyncOff 关闭同步
