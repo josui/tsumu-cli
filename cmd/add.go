@@ -12,14 +12,14 @@ import (
 )
 
 // runAdd 执行添加书签流程：抓元数据 → 写数据库 → 打印结果。
-func runAdd(url string) error {
-	fmt.Print("  ⠋ 抓取页面信息...\r") // \r 回到行首，下一行输出会覆盖这行（简易 spinner）
+func runAdd(url string, note string) error {
+	fmt.Print("  ⠋ Fetching page info...\r") // \r 回到行首，下一行输出会覆盖这行（简易 spinner）
 
 	// 抓取网页元数据
 	metadata, err := meta.Fetch(url)
 	if err != nil {
 		// 元数据抓取失败不算致命错误，用 URL 域名兜底
-		fmt.Printf("  ⚠ 元数据抓取失败: %v\n", err)
+		fmt.Printf("  ⚠ Metadata fetch failed: %v\n", err)
 		metadata = &meta.Metadata{
 			Title:    url,
 			SiteName: url,
@@ -27,9 +27,9 @@ func runAdd(url string) error {
 	}
 
 	// 写入数据库
-	bm, err := db.CreateBookmark(DB, url, metadata.Title, metadata.Description, metadata.SiteName)
+	bm, err := db.CreateBookmark(DB, url, metadata.Title, metadata.Description, metadata.SiteName, note)
 	if err != nil {
-		return fmt.Errorf("保存失败: %w", err)
+		return fmt.Errorf("save failed: %w", err)
 	}
 
 	// 打印成功消息
@@ -37,6 +37,6 @@ func runAdd(url string) error {
 	if displayName == "" {
 		displayName = bm.URL
 	}
-	fmt.Printf("  ✓ 已保存: %s (%s)\n", displayName, bm.SiteName)
+	fmt.Printf("  ✓ Saved: %s (%s)\n", displayName, bm.SiteName)
 	return nil
 }

@@ -1,73 +1,104 @@
 // cli/cmd/root.go
 
 // Package cmd 定义 tsumu 的 CLI 命令。
-// 使用 cobra 框架：rootCmd 是根命令，子命令和 flag 挂载在其上。
+// 使用 cobra 框架：rootCmd 是根命令，add / find 是子命令。
+// 同时保留 -a / -s flag 作为快捷方式。
 package cmd
 
 import (
 	"database/sql"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-// 命令行 flag 变量
-// cobra 会把用户输入的 flag 值绑定到这些变量上
+// root flag 变量（快捷方式，兼容旧写法）
 var (
-	flagAdd      string // -a <url>: 要添加的 URL
-	flagSearch   string // -s <query>: 搜索关键词
-	flagDetailed bool   // -d: 详细模式
+	flagAdd    string // -a <url>
+	flagSearch string // -s <query>
 )
 
 // DB 是全局数据库连接，由 main.go 注入。
-// 大写开头 = 导出（exported），其他包可以访问。
 var DB *sql.DB
 
 // rootCmd 是 cobra 的根命令。
 var rootCmd = &cobra.Command{
 	Use:   "tsumu",
-	Short: "tsumu — 本地命令行书签管理工具",
-	Long: `tsumu（積む）— 本地优先的命令行书签管理工具。
-快速存链接，快速找到它。
+	Short: "tsumu — local-first CLI bookmark manager",
+	Long: `tsumu — local-first CLI bookmark manager.
+Save links fast, find them faster.
 
-用法:
-  tsumu -a <url>         添加书签
-  tsumu -s <query>       搜索书签
-  tsumu -s -d <query>    搜索书签（详细模式）`,
+Usage:
+  tsumu                          list all bookmarks
+  tsumu add <url> [note...]      add bookmark
+  tsumu find <query>             search bookmarks
+  tsumu find -d <query>          search (detailed)
 
-	// SilenceUsage: 命令出错时不自动打印 usage（避免干扰错误信息）
+Shortcuts:
+  tsumu -a <url> [note...]       add bookmark
+  tsumu -s <query>               search bookmarks`,
+
 	SilenceUsage: true,
 
-	// RunE 比 Run 多一个 error 返回值，cobra 会自动打印错误
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// -a 模式：添加书签
+		// -a 快捷方式
 		if flagAdd != "" {
-			return runAdd(flagAdd)
+			note := strings.Join(args, " ")
+			return runAdd(flagAdd, note)
 		}
 
-		// -s 模式：搜索
+		// -s 快捷方式
 		if flagSearch != "" {
-			return runSearch(flagSearch, flagDetailed)
+			return runSearch(flagSearch, false)
 		}
 
-		// 无参数：打印帮助
-		return cmd.Help()
+		// 无参数：列出全部书签
+		return runSearch("", false)
+	},
+}
+
+// addCmd 是 tsumu add <url> [note...] 子命令。
+var addCmd = &cobra.Command{
+	Use:   "add <url> [note...]",
+	Short: "Add a bookmark",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		url := args[0]
+		note := strings.Join(args[1:], " ")
+		return runAdd(url, note)
+	},
+}
+
+// find flag
+var findDetailed bool
+
+// findCmd 是 tsumu find <query> 子命令。
+var findCmd = &cobra.Command{
+	Use:   "find <query>",
+	Short: "Search bookmarks",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSearch(args[0], findDetailed)
 	},
 }
 
 // Execute 是 CLI 的入口点，由 main.go 调用。
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		// cobra 已经打印了错误信息，这里只需要设置退出码
 		os.Exit(1)
 	}
 }
 
-// init 函数在包被导入时自动执行（Go 的初始化机制）。
-// 这里用来注册 flag。
 func init() {
-	// StringVarP: 绑定字符串 flag，P 后缀支持短写（-a）和长写（--add）
-	rootCmd.Flags().StringVarP(&flagAdd, "add", "a", "", "添加书签: tsumu -a <url>")
-	rootCmd.Flags().StringVarP(&flagSearch, "search", "s", "", "搜索书签: tsumu -s <query>")
-	rootCmd.Flags().BoolVarP(&flagDetailed, "detailed", "d", false, "详细模式（配合 -s 使用）")
+	// root 快捷 flag
+	rootCmd.Flags().StringVarP(&flagAdd, "add", "a", "", "add bookmark: tsumu -a <url>")
+	rootCmd.Flags().StringVarP(&flagSearch, "search", "s", "", "search bookmarks: tsumu -s <query>")
+
+	// find 子命令的 flag
+	findCmd.Flags().BoolVarP(&findDetailed, "detailed", "d", false, "detailed mode")
+
+	// 注册子命令
+	rootCmd.AddCommand(addCmd)
+	rootCmd.AddCommand(findCmd)
 }

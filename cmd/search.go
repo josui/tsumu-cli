@@ -24,7 +24,7 @@ func runSearch(query string, detailed bool) error {
 
 	// Run 启动事件循环，阻塞直到程序退出（用户按 q 或 Ctrl+C）
 	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("TUI 启动失败: %w", err)
+		return fmt.Errorf("TUI failed to start: %w", err)
 	}
 
 	return nil

@@ -20,6 +20,8 @@ var (
 // lipgloss.NewStyle() 返回一个不可变的样式对象，链式调用设置属性
 var (
 	titleStyle        = lipgloss.NewStyle().Bold(true)
+	focusTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary) // 选中项标题高亮
+	cursorStyle       = lipgloss.NewStyle().Foreground(colorPrimary)            // 光标指示符 ▸
 	domainStyle       = lipgloss.NewStyle().Foreground(colorDim)
 	clickStyle        = lipgloss.NewStyle().Foreground(colorDim)
 	noteStyle         = lipgloss.NewStyle().Foreground(colorDim).Italic(true)

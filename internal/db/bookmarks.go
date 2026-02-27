@@ -40,13 +40,13 @@ func newULID() string {
 
 // CreateBookmark 创建一条新书签，返回创建后的 Bookmark。
 // URL 有唯一约束，重复添加会返回错误。
-func CreateBookmark(db *sql.DB, url, title, description, siteName string) (*Bookmark, error) {
+func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) (*Bookmark, error) {
 	id := newULID()
 
 	_, err := db.Exec(
-		`INSERT INTO bookmarks (id, url, title, description, site_name, source)
-		 VALUES (?, ?, ?, ?, ?, 'cli')`,
-		id, url, title, description, siteName,
+		`INSERT INTO bookmarks (id, url, title, description, site_name, note, source)
+		 VALUES (?, ?, ?, ?, ?, ?, 'cli')`,
+		id, url, title, description, siteName, note,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert bookmark failed: %w", err)

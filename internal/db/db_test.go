@@ -81,7 +81,7 @@ func TestCreateBookmark(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, err := CreateBookmark(database, "https://example.com", "Example", "A test site", "example.com")
+	bm, err := CreateBookmark(database, "https://example.com", "Example", "A test site", "example.com", "")
 	if err != nil {
 		t.Fatalf("CreateBookmark failed: %v", err)
 	}
@@ -105,13 +105,13 @@ func TestCreateBookmark_DuplicateURL(t *testing.T) {
 	}
 	defer database.Close()
 
-	_, err = CreateBookmark(database, "https://example.com", "Example", "", "")
+	_, err = CreateBookmark(database, "https://example.com", "Example", "", "", "")
 	if err != nil {
 		t.Fatalf("first create failed: %v", err)
 	}
 
 	// 重复 URL 应报错
-	_, err = CreateBookmark(database, "https://example.com", "Example 2", "", "")
+	_, err = CreateBookmark(database, "https://example.com", "Example 2", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for duplicate URL, got nil")
 	}
@@ -125,7 +125,7 @@ func TestToggleFavorite(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	if bm.IsFavorite {
 		t.Error("new bookmark should not be favorite")
@@ -156,7 +156,7 @@ func TestIncrementClickCount(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	count, err := IncrementClickCount(database, bm.ID)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestDeleteBookmark(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	err = DeleteBookmark(database, bm.ID)
 	if err != nil {
@@ -199,7 +199,7 @@ func TestAddTagsToBookmark(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	err = AddTagsToBookmark(database, bm.ID, []string{"design", "color palette"})
 	if err != nil {
@@ -220,7 +220,7 @@ func TestAddTagsToBookmark_Idempotent(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "")
+	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	_ = AddTagsToBookmark(database, bm.ID, []string{"design"})
 	err = AddTagsToBookmark(database, bm.ID, []string{"design", "tool"})
@@ -237,8 +237,8 @@ func TestSearch_Default(t *testing.T) {
 	}
 	defer database.Close()
 
-	CreateBookmark(database, "https://coolors.co", "Coolors - Color palette generator", "color tools", "coolors.co")
-	CreateBookmark(database, "https://example.com", "Example Site", "nothing special", "example.com")
+	CreateBookmark(database, "https://coolors.co", "Coolors - Color palette generator", "color tools", "coolors.co", "")
+	CreateBookmark(database, "https://example.com", "Example Site", "nothing special", "example.com", "")
 
 	results, total, err := Search(database, "color", false, 5, 0)
 	if err != nil {
@@ -260,7 +260,7 @@ func TestSearch_DetailedMode(t *testing.T) {
 	}
 	defer database.Close()
 
-	bm, _ := CreateBookmark(database, "https://coolors.co", "Coolors", "color tools", "coolors.co")
+	bm, _ := CreateBookmark(database, "https://coolors.co", "Coolors", "color tools", "coolors.co", "")
 	AddTagsToBookmark(database, bm.ID, []string{"design", "color"})
 
 	results, _, err := Search(database, "color", true, 5, 0)

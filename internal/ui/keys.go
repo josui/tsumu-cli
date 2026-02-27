@@ -8,9 +8,12 @@ package ui
 // 按键常量
 // bubbletea 的 KeyMsg.String() 返回这些字符串
 const (
-	keyQuit     = "q"
-	keyEsc      = "esc"
-	keyNextPage = "j"
-	keyPrevPage = "k"
-	keyEnter    = "enter"
+	keyQuit  = "q"
+	keyEsc   = "esc"
+	keyDown  = "j" // 光标下移
+	keyUp    = "k" // 光标上移
+	keyEnter = "enter"
+	keyTag   = "t" // 给选中项打标签
+	keyFav   = "f" // 收藏/取消收藏选中项
+	keyDel   = "d" // 删除选中项
 )

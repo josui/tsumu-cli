@@ -2,9 +2,12 @@
 
 // model.go 是 bubbletea TUI 的核心。
 // 实现 Elm 架构的三个部分：
-// - Model: 应用状态（搜索结果、当前页、输入缓冲等）
+// - Model: 应用状态（搜索结果、光标位置、输入模式等）
 // - Update: 事件处理（按键、命令执行结果）
 // - View: 渲染终端输出（根据状态生成字符串）
+//
+// 交互模型：cursor-based 导航
+// j/k 移动光标，Enter 打开，d 删除，f 收藏，t 打标签
 
 package ui
 
@@ -13,12 +16,24 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/user/tsumu-cli/internal/db"
+)
+
+// ============================================================
+// 输入模式
+// ============================================================
+
+// inputMode 表示当前的输入模式
+type inputMode int
+
+const (
+	modeNormal  inputMode = iota // 普通模式：j/k/Enter/d/f/t/q 即时操作
+	modeTag                      // 标签输入模式：输入标签文本，Enter 提交
+	modeConfirm                  // 删除确认模式：y 确认，其他键取消
 )
 
 // ============================================================
@@ -28,17 +43,18 @@ import (
 // Model 是 TUI 的完整状态。bubbletea 要求实现 Init/Update/View 三个方法。
 type Model struct {
 	db       *sql.DB       // 数据库连接
-	query    string        // 搜索关键词
-	detailed bool          // 是否详细模式 (-sd)
+	query    string        // 搜索关键词（空 = 列出全部）
+	detailed bool          // 是否详细模式
 	results  []db.Bookmark // 搜索结果
-	total    int           // 结果总数（用于分页）
-	page     int           // 当前页码（从 0 开始）
+	total    int           // 结果总数
 	pageSize int           // 每页条数
 
-	input         string // 用户输入缓冲区（数字、t2 tag1, f3, d3 等）
-	confirmDelete int    // 正在确认删除的序号，-1 表示不在确认状态
-	message       string // 底部反馈消息
-	isError       bool   // message 是否为错误消息
+	cursor int       // 当前光标位置（全局索引，0-based）
+	mode   inputMode // 当前输入模式
+	input  string    // 标签输入缓冲区（仅 modeTag 时使用）
+
+	message string // 底部反馈消息
+	isError bool   // message 是否为错误消息
 
 	width int // 终端宽度
 }
@@ -46,11 +62,11 @@ type Model struct {
 // NewModel 创建并初始化 Model。
 func NewModel(database *sql.DB, query string, detailed bool) Model {
 	return Model{
-		db:            database,
-		query:         query,
-		detailed:      detailed,
-		pageSize:      5,
-		confirmDelete: -1,
+		db:       database,
+		query:    query,
+		detailed: detailed,
+		pageSize: 5,
+		mode:     modeNormal,
 	}
 }
 
@@ -79,6 +95,48 @@ type actionResultMsg struct {
 }
 
 // ============================================================
+// 光标与分页辅助
+// ============================================================
+
+// page 根据光标位置计算当前页码（0-based）
+func (m Model) page() int {
+	if m.pageSize == 0 {
+		return 0
+	}
+	return m.cursor / m.pageSize
+}
+
+// totalPages 计算总页数
+func (m Model) totalPages() int {
+	if len(m.results) == 0 {
+		return 1
+	}
+	return (len(m.results) + m.pageSize - 1) / m.pageSize
+}
+
+// pageStart 当前页的起始索引
+func (m Model) pageStart() int {
+	return m.page() * m.pageSize
+}
+
+// pageEnd 当前页的结束索引（不含）
+func (m Model) pageEnd() int {
+	end := m.pageStart() + m.pageSize
+	if end > len(m.results) {
+		end = len(m.results)
+	}
+	return end
+}
+
+// focusedBookmark 返回当前光标指向的书签，无结果时返回 nil
+func (m Model) focusedBookmark() *db.Bookmark {
+	if m.cursor < 0 || m.cursor >= len(m.results) {
+		return nil
+	}
+	return &m.results[m.cursor]
+}
+
+// ============================================================
 // Init / Update / View
 // ============================================================
 
@@ -97,21 +155,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchResultMsg:
 		if msg.err != nil {
-			m.message = fmt.Sprintf("搜索失败: %v", msg.err)
+			m.message = fmt.Sprintf("Search failed: %v", msg.err)
 			m.isError = true
 			return m, nil
 		}
 		m.results = msg.results
 		m.total = msg.total
 		m.message = ""
+		// 删除后光标可能越界，修正
+		if m.cursor >= len(m.results) && len(m.results) > 0 {
+			m.cursor = len(m.results) - 1
+		}
 		return m, nil
 
 	case openResultMsg:
 		if msg.err != nil {
-			m.message = fmt.Sprintf("打开失败: %v", msg.err)
+			m.message = fmt.Sprintf("Open failed: %v", msg.err)
 			m.isError = true
 		} else {
-			m.message = fmt.Sprintf("✓ 已打开 %s (×%d)", msg.title, msg.count)
+			m.message = fmt.Sprintf("✓ Opened %s (×%d)", msg.title, msg.count)
 			m.isError = false
 		}
 		return m, nil
@@ -131,7 +193,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey 处理按键输入。
+// ============================================================
+// 按键处理
+// ============================================================
+
+// handleKey 根据当前模式分发按键处理
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -140,168 +206,144 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// --- 删除确认状态 ---
-	if m.confirmDelete >= 0 {
-		switch key {
-		case "y":
-			idx := m.confirmDelete
-			m.confirmDelete = -1
-			return m, m.doDelete(idx)
-		default:
-			m.confirmDelete = -1
-			m.message = "已取消删除"
-			m.isError = false
-			return m, nil
+	switch m.mode {
+	case modeConfirm:
+		return m.handleConfirmKey(key)
+	case modeTag:
+		return m.handleTagKey(key)
+	default:
+		return m.handleNormalKey(key)
+	}
+}
+
+// handleNormalKey 处理普通模式的按键
+func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+
+	// 退出
+	case keyQuit:
+		return m, tea.Quit
+
+	// 清除消息
+	case keyEsc:
+		m.message = ""
+		return m, nil
+
+	// 光标下移
+	case keyDown, "down":
+		if m.cursor < len(m.results)-1 {
+			m.cursor++
+			m.message = ""
 		}
+		return m, nil
+
+	// 光标上移
+	case keyUp, "up":
+		if m.cursor > 0 {
+			m.cursor--
+			m.message = ""
+		}
+		return m, nil
+
+	// 打开选中项
+	case keyEnter:
+		if bm := m.focusedBookmark(); bm != nil {
+			return m, m.doOpen()
+		}
+		return m, nil
+
+	// 删除选中项（进入确认模式）
+	case keyDel:
+		if bm := m.focusedBookmark(); bm != nil {
+			m.mode = modeConfirm
+			m.message = fmt.Sprintf("Delete %s? [y/any key to cancel]", bm.Title)
+			m.isError = false
+		}
+		return m, nil
+
+	// 收藏/取消收藏选中项
+	case keyFav:
+		if bm := m.focusedBookmark(); bm != nil {
+			return m, m.doToggleFavorite()
+		}
+		return m, nil
+
+	// 进入标签输入模式
+	case keyTag:
+		if bm := m.focusedBookmark(); bm != nil {
+			m.mode = modeTag
+			m.input = ""
+			m.message = ""
+		}
+		return m, nil
 	}
 
-	// --- 即时按键（不需要 Enter） ---
+	return m, nil
+}
+
+// handleConfirmKey 处理删除确认模式的按键
+func (m Model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
+	m.mode = modeNormal
+	if key == "y" {
+		return m, m.doDelete()
+	}
+	m.message = "Delete cancelled"
+	m.isError = false
+	return m, nil
+}
+
+// handleTagKey 处理标签输入模式的按键
+func (m Model) handleTagKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
-	case keyQuit:
-		if m.input == "" {
-			return m, tea.Quit
-		}
 	case keyEsc:
+		// 取消标签输入
+		m.mode = modeNormal
 		m.input = ""
 		m.message = ""
 		return m, nil
-	case keyNextPage:
-		if m.input == "" {
-			maxPage := 0
-			if m.total > 0 {
-				maxPage = (m.total - 1) / m.pageSize
-			}
-			if m.page < maxPage {
-				m.page++
-			}
+
+	case keyEnter:
+		// 提交标签
+		m.mode = modeNormal
+		tagStr := strings.TrimSpace(m.input)
+		m.input = ""
+
+		if tagStr == "" {
+			m.message = "Tags cannot be empty"
+			m.isError = true
 			return m, nil
 		}
-	case keyPrevPage:
-		if m.input == "" {
-			if m.page > 0 {
-				m.page--
+
+		var tags []string
+		for _, t := range strings.Split(tagStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
 			}
+		}
+		if len(tags) == 0 {
+			m.message = "Tags cannot be empty"
+			m.isError = true
 			return m, nil
 		}
-	}
 
-	// --- 需要 Enter 的输入 ---
-	if key == keyEnter {
-		return m.handleInputSubmit()
-	}
+		return m, m.doAddTags(tags)
 
-	// 退格键
-	if key == "backspace" {
+	case "backspace":
 		if len(m.input) > 0 {
-			m.input = m.input[:len(m.input)-1]
+			// 处理多字节字符（中文等）
+			runes := []rune(m.input)
+			m.input = string(runes[:len(runes)-1])
+		}
+		return m, nil
+
+	default:
+		// 累积输入字符（过滤控制键）
+		if len(key) == 1 || key == " " {
+			m.input += key
 		}
 		return m, nil
 	}
-
-	// 累积输入字符
-	if len(key) == 1 {
-		m.input += key
-	}
-
-	return m, nil
-}
-
-// handleInputSubmit 处理 Enter 提交的输入。
-func (m Model) handleInputSubmit() (tea.Model, tea.Cmd) {
-	input := strings.TrimSpace(m.input)
-	m.input = ""
-
-	if input == "" {
-		return m, nil
-	}
-
-	// t{n} tag1,tag2 — 打标签
-	if strings.HasPrefix(input, "t") {
-		return m.handleTagInput(input[1:])
-	}
-
-	// f{n} — 收藏
-	if strings.HasPrefix(input, "f") {
-		return m.handleFavoriteInput(input[1:])
-	}
-
-	// d{n} — 删除
-	if strings.HasPrefix(input, "d") {
-		return m.handleDeleteInput(input[1:])
-	}
-
-	// 纯数字 — 打开
-	if num, err := strconv.Atoi(input); err == nil {
-		return m, m.doOpen(num)
-	}
-
-	m.message = fmt.Sprintf("无法识别的输入: %s", input)
-	m.isError = true
-	return m, nil
-}
-
-func (m Model) handleTagInput(rest string) (tea.Model, tea.Cmd) {
-	parts := strings.SplitN(rest, " ", 2)
-	if len(parts) < 2 {
-		m.message = "格式: t{序号} tag1,tag2"
-		m.isError = true
-		return m, nil
-	}
-
-	num, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		m.message = "无效序号"
-		m.isError = true
-		return m, nil
-	}
-
-	tagStr := strings.TrimSpace(parts[1])
-	if tagStr == "" {
-		m.message = "标签不能为空"
-		m.isError = true
-		return m, nil
-	}
-
-	var tags []string
-	for _, t := range strings.Split(tagStr, ",") {
-		t = strings.TrimSpace(t)
-		if t != "" {
-			tags = append(tags, t)
-		}
-	}
-
-	return m, m.doAddTags(num, tags)
-}
-
-func (m Model) handleFavoriteInput(rest string) (tea.Model, tea.Cmd) {
-	num, err := strconv.Atoi(strings.TrimSpace(rest))
-	if err != nil {
-		m.message = "无效序号"
-		m.isError = true
-		return m, nil
-	}
-	return m, m.doToggleFavorite(num)
-}
-
-func (m Model) handleDeleteInput(rest string) (tea.Model, tea.Cmd) {
-	num, err := strconv.Atoi(strings.TrimSpace(rest))
-	if err != nil {
-		m.message = "无效序号"
-		m.isError = true
-		return m, nil
-	}
-
-	bm := m.getBookmarkByIndex(num)
-	if bm == nil {
-		m.message = fmt.Sprintf("序号 %d 超出范围", num)
-		m.isError = true
-		return m, nil
-	}
-
-	m.confirmDelete = num
-	m.message = fmt.Sprintf("确认删除 %s? [y/其他键取消]", bm.Title)
-	m.isError = false
-	return m, nil
 }
 
 // ============================================================
@@ -315,11 +357,11 @@ func (m Model) doSearch() tea.Cmd {
 	}
 }
 
-func (m Model) doOpen(index int) tea.Cmd {
+func (m Model) doOpen() tea.Cmd {
 	return func() tea.Msg {
-		bm := m.getBookmarkByIndex(index)
+		bm := m.focusedBookmark()
 		if bm == nil {
-			return openResultMsg{err: fmt.Errorf("序号 %d 超出范围", index)}
+			return openResultMsg{err: fmt.Errorf("no bookmark selected")}
 		}
 
 		if err := openBrowser(bm.URL); err != nil {
@@ -339,52 +381,54 @@ func (m Model) doOpen(index int) tea.Cmd {
 	}
 }
 
-func (m Model) doToggleFavorite(index int) tea.Cmd {
-	return func() tea.Msg {
-		bm := m.getBookmarkByIndex(index)
-		if bm == nil {
-			return actionResultMsg{message: fmt.Sprintf("序号 %d 超出范围", index), isError: true}
-		}
+func (m Model) doToggleFavorite() tea.Cmd {
+	// 捕获当前书签信息（闭包在异步执行时 model 可能已变）
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+	title := bm.Title
 
-		isFav, err := db.ToggleFavorite(m.db, bm.ID)
+	return func() tea.Msg {
+		isFav, err := db.ToggleFavorite(m.db, id)
 		if err != nil {
-			return actionResultMsg{message: fmt.Sprintf("操作失败: %v", err), isError: true}
+			return actionResultMsg{message: fmt.Sprintf("Action failed: %v", err), isError: true}
 		}
-
 		if isFav {
-			return actionResultMsg{message: fmt.Sprintf("✓ ★ 已收藏 %s", bm.Title)}
+			return actionResultMsg{message: fmt.Sprintf("✓ ★ Favorited %s", title)}
 		}
-		return actionResultMsg{message: fmt.Sprintf("✓ ☆ 已取消收藏 %s", bm.Title)}
+		return actionResultMsg{message: fmt.Sprintf("✓ ☆ Unfavorited %s", title)}
 	}
 }
 
-func (m Model) doAddTags(index int, tags []string) tea.Cmd {
+func (m Model) doAddTags(tags []string) tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+
 	return func() tea.Msg {
-		bm := m.getBookmarkByIndex(index)
-		if bm == nil {
-			return actionResultMsg{message: fmt.Sprintf("序号 %d 超出范围", index), isError: true}
+		if err := db.AddTagsToBookmark(m.db, id, tags); err != nil {
+			return actionResultMsg{message: fmt.Sprintf("Tag failed: %v", err), isError: true}
 		}
-
-		if err := db.AddTagsToBookmark(m.db, bm.ID, tags); err != nil {
-			return actionResultMsg{message: fmt.Sprintf("打标签失败: %v", err), isError: true}
-		}
-
-		return actionResultMsg{message: fmt.Sprintf("✓ 已添加标签: %s", strings.Join(tags, ", "))}
+		return actionResultMsg{message: fmt.Sprintf("✓ Tagged: %s", strings.Join(tags, ", "))}
 	}
 }
 
-func (m Model) doDelete(index int) tea.Cmd {
+func (m Model) doDelete() tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+
 	return func() tea.Msg {
-		bm := m.getBookmarkByIndex(index)
-		if bm == nil {
-			return actionResultMsg{message: fmt.Sprintf("序号 %d 超出范围", index), isError: true}
+		if err := db.DeleteBookmark(m.db, id); err != nil {
+			return actionResultMsg{message: fmt.Sprintf("Delete failed: %v", err), isError: true}
 		}
-
-		if err := db.DeleteBookmark(m.db, bm.ID); err != nil {
-			return actionResultMsg{message: fmt.Sprintf("删除失败: %v", err), isError: true}
-		}
-
-		return actionResultMsg{message: "✓ 已删除"}
+		return actionResultMsg{message: "✓ Deleted"}
 	}
 }
 
@@ -396,15 +440,15 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// 顶部：搜索词 + 页码
-	totalPages := (m.total + m.pageSize - 1) / m.pageSize
-	if totalPages == 0 {
-		totalPages = 1
+	var header string
+	if m.query == "" {
+		header = "tsumu"
+	} else if m.detailed {
+		header = fmt.Sprintf("tsumu find -d %s", m.query)
+	} else {
+		header = fmt.Sprintf("tsumu find %s", m.query)
 	}
-	header := fmt.Sprintf("tsumu -s %s", m.query)
-	if m.detailed {
-		header = fmt.Sprintf("tsumu -sd %s", m.query)
-	}
-	pageInfo := fmt.Sprintf("%d/%d 页", m.page+1, totalPages)
+	pageInfo := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
 	gap := 60 - len(header) - len(pageInfo)
 	if gap < 2 {
 		gap = 2
@@ -414,22 +458,20 @@ func (m Model) View() string {
 
 	// 无结果
 	if len(m.results) == 0 {
-		b.WriteString("  没有找到匹配的书签\n")
+		b.WriteString("  No matching bookmarks found\n")
 	} else {
-		start := m.page * m.pageSize
-		end := start + m.pageSize
-		if end > len(m.results) {
-			end = len(m.results)
-		}
+		start := m.pageStart()
+		end := m.pageEnd()
 		pageResults := m.results[start:end]
 
 		for i, bm := range pageResults {
-			globalIdx := start + i + 1
+			globalIdx := start + i
+			isFocused := globalIdx == m.cursor
 
 			if m.detailed {
-				b.WriteString(m.renderDetailed(globalIdx, &bm))
+				b.WriteString(m.renderDetailed(globalIdx+1, &bm, isFocused))
 			} else {
-				b.WriteString(m.renderDefault(globalIdx, &bm))
+				b.WriteString(m.renderDefault(globalIdx+1, &bm, isFocused))
 			}
 
 			if i < len(pageResults)-1 {
@@ -451,66 +493,92 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
-	// 操作提示
-	if m.confirmDelete < 0 {
-		b.WriteString(helpStyle.Render("  [n] 打开  [t+n] 标签  [f+n] 收藏  [d+n] 删除"))
-		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("  [j] 下一页  [k] 上一页  [q] 退出"))
-		b.WriteString("\n")
+	// 标签输入提示
+	if m.mode == modeTag {
+		b.WriteString(fmt.Sprintf("  tags> %s\n", m.input))
 	}
 
-	// 输入缓冲区
-	if m.input != "" {
-		b.WriteString(fmt.Sprintf("\n  > %s", m.input))
+	// 操作提示
+	if m.mode == modeNormal {
+		b.WriteString(helpStyle.Render("  [enter] open  [t] tag  [f] fav  [d] delete"))
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("  [j] ↓  [k] ↑  [q] quit"))
+		b.WriteString("\n")
 	}
 
 	return b.String()
 }
 
-func (m Model) renderDefault(idx int, bm *db.Bookmark) string {
+// renderDefault 渲染默认模式的单条书签。isFocused 控制高亮。
+func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 	var b strings.Builder
+
+	// 光标指示符
+	cursor := "  "
+	if isFocused {
+		cursor = cursorStyle.Render("▸ ")
+	}
 
 	idxStr := indexStyle.Render(fmt.Sprintf("%d", idx))
 	star := "  "
 	if bm.IsFavorite {
 		star = starStyle.Render("★ ")
 	}
-	title := titleStyle.Render(truncate(bm.Title, 35))
+
+	// 选中时标题高亮
+	var title string
+	if isFocused {
+		title = focusTitleStyle.Render(truncate(bm.Title, 35))
+	} else {
+		title = titleStyle.Render(truncate(bm.Title, 35))
+	}
 	domain := domainStyle.Render(truncate(bm.SiteName, 20))
 	clicks := clickStyle.Render(fmt.Sprintf("×%d", bm.ClickCount))
 
-	b.WriteString(fmt.Sprintf("  %s %s%s  %s  %s\n", idxStr, star, title, domain, clicks))
+	fmt.Fprintf(&b, "%s%s %s%s  %s  %s\n", cursor, idxStr, star, title, domain, clicks)
 
 	if bm.Note != "" {
-		b.WriteString(fmt.Sprintf("       %s\n", noteStyle.Render(truncate(bm.Note, 55))))
+		fmt.Fprintf(&b, "       %s\n", noteStyle.Render(truncate(bm.Note, 55)))
 	}
 
 	return b.String()
 }
 
-func (m Model) renderDetailed(idx int, bm *db.Bookmark) string {
+// renderDetailed 渲染详细模式的单条书签。
+func (m Model) renderDetailed(idx int, bm *db.Bookmark, isFocused bool) string {
 	var b strings.Builder
+
+	cursor := "  "
+	if isFocused {
+		cursor = cursorStyle.Render("▸ ")
+	}
 
 	idxStr := indexStyle.Render(fmt.Sprintf("%d", idx))
 	star := "  "
 	if bm.IsFavorite {
 		star = starStyle.Render("★ ")
 	}
-	title := titleStyle.Render(bm.Title)
-	b.WriteString(fmt.Sprintf("  %s %s%s\n", idxStr, star, title))
 
-	b.WriteString(fmt.Sprintf("       %s\n", domainStyle.Render(bm.URL)))
+	var title string
+	if isFocused {
+		title = focusTitleStyle.Render(bm.Title)
+	} else {
+		title = titleStyle.Render(bm.Title)
+	}
+	fmt.Fprintf(&b, "%s%s %s%s\n", cursor, idxStr, star, title)
+
+	fmt.Fprintf(&b, "       %s\n", domainStyle.Render(bm.URL))
 
 	if bm.Description != "" {
-		b.WriteString(fmt.Sprintf("       %s\n", truncate(bm.Description, 55)))
+		fmt.Fprintf(&b, "       %s\n", truncate(bm.Description, 55))
 	}
 
 	if bm.Note != "" {
-		b.WriteString(fmt.Sprintf("       %s\n", noteStyle.Render("📝 "+bm.Note)))
+		fmt.Fprintf(&b, "       %s\n", noteStyle.Render("📝 "+bm.Note))
 	}
 
 	if bm.Tags != "" {
-		b.WriteString(fmt.Sprintf("       %s\n", tagStyle.Render("tags: "+bm.Tags)))
+		fmt.Fprintf(&b, "       %s\n", tagStyle.Render("tags: "+bm.Tags))
 	}
 
 	date := ""
@@ -518,7 +586,7 @@ func (m Model) renderDetailed(idx int, bm *db.Bookmark) string {
 		date = bm.CreatedAt[:10]
 	}
 	metaLine := fmt.Sprintf("added: %s    clicks: ×%d    source: %s", date, bm.ClickCount, bm.Source)
-	b.WriteString(fmt.Sprintf("       %s\n", metaStyle.Render(metaLine)))
+	fmt.Fprintf(&b, "       %s\n", metaStyle.Render(metaLine))
 
 	return b.String()
 }
@@ -526,14 +594,6 @@ func (m Model) renderDetailed(idx int, bm *db.Bookmark) string {
 // ============================================================
 // 辅助函数
 // ============================================================
-
-func (m Model) getBookmarkByIndex(index int) *db.Bookmark {
-	arrayIdx := index - 1
-	if arrayIdx < 0 || arrayIdx >= len(m.results) {
-		return nil
-	}
-	return &m.results[arrayIdx]
-}
 
 func truncate(s string, maxLen int) string {
 	runes := []rune(s)
