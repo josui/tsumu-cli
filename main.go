@@ -66,7 +66,7 @@ func main() {
 		syncOpts = &db.SyncOpts{
 			PrimaryURL: cfg.Sync.URL,
 			AuthToken:  cfg.Sync.AuthToken,
-			Interval:   60 * time.Second,
+			Interval:   0,
 		}
 	}
 
@@ -77,7 +77,18 @@ func main() {
 	}
 	defer store.Close()
 
-	// 3. 注入 Store 到 cmd 包，然后执行命令
+	// 3. 懒同步：启动时检查 interval，需要时后台同步
+	if store.IsSynced() && cfg.Sync.NeedsSync() {
+		go func() {
+			if _, err := store.Sync(); err != nil {
+				return
+			}
+			cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
+			cfg.Save()
+		}()
+	}
+
+	// 4. 注入 Store 到 cmd 包，然后执行命令
 	cmd.Store = store
 	cmd.Cfg = cfg
 	cmd.Execute()
