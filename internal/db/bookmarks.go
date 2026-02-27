@@ -38,12 +38,30 @@ func newULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
 }
 
-// CreateBookmark 创建一条新书签，返回创建后的 Bookmark。
-// URL 有唯一约束，重复添加会返回错误。
+// CreateBookmark 创建或更新书签（URL 相同时覆盖 metadata/note），返回 Bookmark。
 func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) (*Bookmark, error) {
-	id := newULID()
+	// 先查是否已存在
+	var existingID string
+	err := db.QueryRow(`SELECT id FROM bookmarks WHERE url = ?`, url).Scan(&existingID)
+	if err == nil {
+		// 已存在，更新 metadata/note 并刷新时间（排到最上面）
+		_, err := db.Exec(
+			`UPDATE bookmarks
+			 SET title = ?, description = ?, site_name = ?, note = ?,
+			     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+			     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+			 WHERE id = ?`,
+			title, description, siteName, note, existingID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update bookmark failed: %w", err)
+		}
+		return GetBookmarkByID(db, existingID)
+	}
 
-	_, err := db.Exec(
+	// 新增
+	id := newULID()
+	_, err = db.Exec(
 		`INSERT INTO bookmarks (id, url, title, description, site_name, note, source)
 		 VALUES (?, ?, ?, ?, ?, ?, 'cli')`,
 		id, url, title, description, siteName, note,
@@ -51,8 +69,6 @@ func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) 
 	if err != nil {
 		return nil, fmt.Errorf("insert bookmark failed: %w", err)
 	}
-
-	// 返回刚创建的书签（从数据库重新读取，获取默认值）
 	return GetBookmarkByID(db, id)
 }
 

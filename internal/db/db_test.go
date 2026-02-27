@@ -89,18 +89,25 @@ func TestCreateBookmark(t *testing.T) {
 	}
 }
 
-func TestCreateBookmark_DuplicateURL(t *testing.T) {
+func TestCreateBookmark_DuplicateURL_Upsert(t *testing.T) {
 	database := openTestDB(t)
 
-	_, err := CreateBookmark(database, "https://example.com", "Example", "", "", "")
+	bm1, err := CreateBookmark(database, "https://example.com", "Example", "desc1", "", "")
 	if err != nil {
 		t.Fatalf("first create failed: %v", err)
 	}
 
-	// 重复 URL 应报错
-	_, err = CreateBookmark(database, "https://example.com", "Example 2", "", "", "")
-	if err == nil {
-		t.Fatal("expected error for duplicate URL, got nil")
+	// 重复 URL → upsert（更新 metadata，保留同一 ID）
+	bm2, err := CreateBookmark(database, "https://example.com", "Example Updated", "desc2", "", "")
+	if err != nil {
+		t.Fatalf("upsert failed: %v", err)
+	}
+
+	if bm2.ID != bm1.ID {
+		t.Errorf("upsert should keep same ID, got %s vs %s", bm2.ID, bm1.ID)
+	}
+	if bm2.Title != "Example Updated" {
+		t.Errorf("expected updated title, got %q", bm2.Title)
 	}
 }
 
