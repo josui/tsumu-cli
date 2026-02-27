@@ -42,16 +42,19 @@ const (
 
 // Model 是 TUI 的完整状态。bubbletea 要求实现 Init/Update/View 三个方法。
 type Model struct {
-	db       *sql.DB       // 数据库连接
-	query    string        // 搜索关键词（空 = 列出全部）
-	detailed bool          // 是否详细模式
-	results  []db.Bookmark // 搜索结果
+	db      *sql.DB       // 数据库连接
+	query   string        // 搜索关键词（空 = 列出全部）
+	results []db.Bookmark // 搜索结果
 	total    int           // 结果总数
 	pageSize int           // 每页条数
 
 	cursor int       // 当前光标位置（全局索引，0-based）
 	mode   inputMode // 当前输入模式
 	input  string    // 标签输入缓冲区（仅 modeTag 时使用）
+
+	favOnly bool   // 仅显示收藏
+	since   string // 时间筛选（ISO 时间字符串）
+	tag     string // 按标签筛选
 
 	message string // 底部反馈消息
 	isError bool   // message 是否为错误消息
@@ -60,14 +63,26 @@ type Model struct {
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, detailed bool) Model {
+func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string) Model {
 	return Model{
-		db:       database,
-		query:    query,
-		detailed: detailed,
+		db:      database,
+		query:   query,
+		favOnly: favOnly,
+		since:   since,
+		tag:     tag,
 		pageSize: 5,
 		mode:     modeNormal,
+		width:    80, // 默认值，WindowSizeMsg 到达后会更新
 	}
+}
+
+// contentWidth 返回可用内容宽度（留 2 字符左右边距）
+func (m Model) contentWidth() int {
+	w := m.width - 2
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
 // ============================================================
@@ -352,7 +367,7 @@ func (m Model) handleTagKey(key string) (tea.Model, tea.Cmd) {
 
 func (m Model) doSearch() tea.Cmd {
 	return func() tea.Msg {
-		results, total, err := db.Search(m.db, m.query, m.detailed, 50000, 0)
+		results, total, err := db.Search(m.db, m.query, 50000, 0, m.since, m.favOnly, m.tag)
 		return searchResultMsg{results: results, total: total, err: err}
 	}
 }
@@ -442,14 +457,17 @@ func (m Model) View() string {
 	// 顶部：搜索词 + 页码
 	var header string
 	if m.query == "" {
-		header = "tsumu"
-	} else if m.detailed {
-		header = fmt.Sprintf("tsumu find -d %s", m.query)
+		if m.favOnly {
+			header = "tsumu ★ favorites"
+		} else {
+			header = "tsumu"
+		}
 	} else {
 		header = fmt.Sprintf("tsumu find %s", m.query)
 	}
 	pageInfo := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
-	gap := 60 - len(header) - len(pageInfo)
+	cw := m.contentWidth()
+	gap := cw - len(header) - len(pageInfo)
 	if gap < 2 {
 		gap = 2
 	}
@@ -468,14 +486,10 @@ func (m Model) View() string {
 			globalIdx := start + i
 			isFocused := globalIdx == m.cursor
 
-			if m.detailed {
-				b.WriteString(m.renderDetailed(globalIdx+1, &bm, isFocused))
-			} else {
-				b.WriteString(m.renderDefault(globalIdx+1, &bm, isFocused))
-			}
+			b.WriteString(m.renderDefault(globalIdx+1, &bm, isFocused))
 
 			if i < len(pageResults)-1 {
-				b.WriteString(dividerStyle.Render("  " + strings.Repeat("─", 60)))
+				b.WriteString(dividerStyle.Render("  " + strings.Repeat("─", cw)))
 				b.WriteString("\n")
 			}
 		}
@@ -500,9 +514,7 @@ func (m Model) View() string {
 
 	// 操作提示
 	if m.mode == modeNormal {
-		b.WriteString(helpStyle.Render("  [enter] open  [t] tag  [f] fav  [d] delete"))
-		b.WriteString("\n")
-		b.WriteString(helpStyle.Render("  [j] ↓  [k] ↑  [q] quit"))
+		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [j]↓ [k]↑  [q] quit"))
 		b.WriteString("\n")
 	}
 
@@ -510,86 +522,85 @@ func (m Model) View() string {
 }
 
 // renderDefault 渲染默认模式的单条书签。isFocused 控制高亮。
+//
+// 布局：▸ N ★ Title............  domain  ×clicks
+//          Note text aligned with title...
+//
+// 左侧固定: cursor(1+1) + idx(2) + space(1) + star(1) + space(1) = 7
+// 右侧固定: "  " + domain + "  " + clicks
+// Title 填满中间剩余空间，右侧右对齐
 func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 	var b strings.Builder
+	cw := m.contentWidth()
+	const prefixWidth = 7 // cursor(2) + idx(2) + " " + star(1) + " "
 
-	// 光标指示符
+	// 光标指示符（1 字符 + 1 空格）
 	cursor := "  "
 	if isFocused {
-		cursor = cursorStyle.Render("▸ ")
+		cursor = cursorStyle.Render("→ ")
 	}
 
+	// 索引（2 字符宽度右对齐）
 	idxStr := indexStyle.Render(fmt.Sprintf("%d", idx))
-	star := "  "
+
+	// 星标（固定 1 字符宽度）
+	star := " "
 	if bm.IsFavorite {
-		star = starStyle.Render("★ ")
+		star = starStyle.Render("★")
 	}
 
-	// 选中时标题高亮
+	// 右侧内容（domain + clicks），计算可见宽度
+	domainText := truncate(bm.SiteName, 15)
+	clicksText := fmt.Sprintf("×%d", bm.ClickCount)
+	rightWidth := len([]rune(domainText)) + 2 + len(clicksText) // domain + "  " + clicks
+
+	// Title 填满剩余空间
+	titleMax := cw - prefixWidth - rightWidth - 2 // 2 = title 与右侧的间距
+	if titleMax < 10 {
+		titleMax = 10
+	}
+
+	titleText := truncate(bm.Title, titleMax)
 	var title string
 	if isFocused {
-		title = focusTitleStyle.Render(truncate(bm.Title, 35))
+		title = focusTitleStyle.Render(titleText)
 	} else {
-		title = titleStyle.Render(truncate(bm.Title, 35))
+		title = titleStyle.Render(titleText)
 	}
-	domain := domainStyle.Render(truncate(bm.SiteName, 20))
-	clicks := clickStyle.Render(fmt.Sprintf("×%d", bm.ClickCount))
 
-	fmt.Fprintf(&b, "%s%s %s%s  %s  %s\n", cursor, idxStr, star, title, domain, clicks)
+	// 用空格填充 title 到固定宽度，使右侧对齐
+	titlePad := titleMax - len([]rune(titleText))
+	if titlePad < 0 {
+		titlePad = 0
+	}
 
+	domain := domainStyle.Render(domainText)
+	clicks := clickStyle.Render(clicksText)
+
+	fmt.Fprintf(&b, "%s%s %s %s%s  %s  %s\n",
+		cursor, idxStr, star, title, strings.Repeat(" ", titlePad), domain, clicks)
+
+	// Note 行，与 title 列对齐
 	if bm.Note != "" {
-		fmt.Fprintf(&b, "       %s\n", noteStyle.Render(truncate(bm.Note, 55)))
+		noteMax := cw - prefixWidth
+		fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", prefixWidth), noteStyle.Render(truncate(bm.Note, noteMax)))
 	}
 
-	return b.String()
-}
-
-// renderDetailed 渲染详细模式的单条书签。
-func (m Model) renderDetailed(idx int, bm *db.Bookmark, isFocused bool) string {
-	var b strings.Builder
-
-	cursor := "  "
-	if isFocused {
-		cursor = cursorStyle.Render("▸ ")
-	}
-
-	idxStr := indexStyle.Render(fmt.Sprintf("%d", idx))
-	star := "  "
-	if bm.IsFavorite {
-		star = starStyle.Render("★ ")
-	}
-
-	var title string
-	if isFocused {
-		title = focusTitleStyle.Render(bm.Title)
-	} else {
-		title = titleStyle.Render(bm.Title)
-	}
-	fmt.Fprintf(&b, "%s%s %s%s\n", cursor, idxStr, star, title)
-
-	fmt.Fprintf(&b, "       %s\n", domainStyle.Render(bm.URL))
-
-	if bm.Description != "" {
-		fmt.Fprintf(&b, "       %s\n", truncate(bm.Description, 55))
-	}
-
-	if bm.Note != "" {
-		fmt.Fprintf(&b, "       %s\n", noteStyle.Render("📝 "+bm.Note))
-	}
-
+	// Tags 行：#[tag1] #[tag2] 格式
 	if bm.Tags != "" {
-		fmt.Fprintf(&b, "       %s\n", tagStyle.Render("tags: "+bm.Tags))
+		var tags []string
+		for _, t := range strings.Split(bm.Tags, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, tagStyle.Render("#"+t))
+			}
+		}
+		fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", prefixWidth), strings.Join(tags, " "))
 	}
-
-	date := ""
-	if len(bm.CreatedAt) >= 10 {
-		date = bm.CreatedAt[:10]
-	}
-	metaLine := fmt.Sprintf("added: %s    clicks: ×%d    source: %s", date, bm.ClickCount, bm.Source)
-	fmt.Fprintf(&b, "       %s\n", metaStyle.Render(metaLine))
 
 	return b.String()
 }
+
 
 // ============================================================
 // 辅助函数
