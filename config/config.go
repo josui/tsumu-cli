@@ -5,8 +5,11 @@
 package config
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +25,10 @@ type Config struct {
 	// TUI 设置
 	PageSize int `toml:"page_size,omitempty"` // 每页显示条数，默认 5
 
-	// [sync] 段落 — Phase 4 才用，现在预留结构
+	// [domain_tags] — URL 域名自动打标签
+	DomainTags map[string]string `toml:"domain_tags"`
+
+	// [sync] 段落
 	Sync SyncConfig `toml:"sync"`
 
 	// [ai] 段落 — Phase 3 才用，现在预留结构
@@ -102,6 +108,13 @@ func Default() *Config {
 	}
 	return &Config{
 		Dir: filepath.Join(home, ".tsumu"),
+		DomainTags: map[string]string{
+			"x.com":       "x",
+			"twitter.com": "x",
+			"github.com":  "github",
+			"figma.com":   "figma",
+			"youtube.com": "youtube",
+		},
 	}
 }
 
@@ -145,9 +158,8 @@ func (c *Config) Load() error {
 	return toml.Unmarshal(data, c)
 }
 
-// Save 将当前配置写入 config.toml。
+// Save 将当前配置写入 config.toml（带注释模板）。
 func (c *Config) Save() error {
-	// 确保目录存在
 	if err := c.EnsureDir(); err != nil {
 		return err
 	}
@@ -156,9 +168,96 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	defer f.Close() // defer: 函数返回前自动关闭文件
+	defer f.Close()
 
-	// toml.NewEncoder 将结构体序列化为 TOML 格式写入文件
-	encoder := toml.NewEncoder(f)
-	return encoder.Encode(c)
+	return writeConfigTOML(f, c)
+}
+
+// writeConfigTOML writes config as commented TOML.
+func writeConfigTOML(w io.Writer, c *Config) error {
+	// ── header ──
+	fmt.Fprintf(w, "# ============================================================\n")
+	fmt.Fprintf(w, "# tsumu configuration\n")
+	fmt.Fprintf(w, "# ============================================================\n\n")
+
+	// ── page_size ──
+	fmt.Fprintf(w, "# TUI 每页显示的书签数 / Number of bookmarks per page in TUI\n")
+	fmt.Fprintf(w, "# Default: 5\n")
+	if c.PageSize > 0 {
+		fmt.Fprintf(w, "page_size = %d\n", c.PageSize)
+	} else {
+		fmt.Fprintf(w, "# page_size = 5\n")
+	}
+
+	// ── domain_tags ──
+	fmt.Fprintf(w, "\n# ============================================================\n")
+	fmt.Fprintf(w, "# Domain auto-tagging\n")
+	fmt.Fprintf(w, "# ============================================================\n")
+	fmt.Fprintf(w, "# 添加书签时，根据 URL 域名自动打标签\n")
+	fmt.Fprintf(w, "# Auto-tag bookmarks based on URL domain when adding.\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "# Format: \"domain\" = \"tag\"\n")
+	fmt.Fprintf(w, "# Example:\n")
+	fmt.Fprintf(w, "#   \"dribbble.com\" = \"design\"\n")
+	fmt.Fprintf(w, "#   \"news.ycombinator.com\" = \"hn\"\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "[domain_tags]\n")
+	if len(c.DomainTags) > 0 {
+		// sort keys for stable output
+		keys := make([]string, 0, len(c.DomainTags))
+		for k := range c.DomainTags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "%q = %q\n", k, c.DomainTags[k])
+		}
+	}
+
+	// ── sync ──
+	fmt.Fprintf(w, "\n# ============================================================\n")
+	fmt.Fprintf(w, "# Cloud sync (Turso)\n")
+	fmt.Fprintf(w, "# ============================================================\n")
+	fmt.Fprintf(w, "# Setup: tsumu sync --setup\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "[sync]\n")
+	fmt.Fprintf(w, "enabled = %t\n", c.Sync.Enabled)
+	if c.Sync.URL != "" {
+		fmt.Fprintf(w, "url = %q\n", c.Sync.URL)
+	} else {
+		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"\n")
+	}
+	if c.Sync.AuthToken != "" {
+		fmt.Fprintf(w, "auth_token = %q\n", c.Sync.AuthToken)
+	} else {
+		fmt.Fprintf(w, "# auth_token = \"your-token\"\n")
+	}
+	if c.Sync.Interval != "" {
+		fmt.Fprintf(w, "interval = %q\n", c.Sync.Interval)
+	} else {
+		fmt.Fprintf(w, "# interval = \"24h\"\n")
+	}
+	if c.Sync.LastSynced != "" {
+		fmt.Fprintf(w, "last_synced = %q\n", c.Sync.LastSynced)
+	}
+
+	// ── ai ──
+	fmt.Fprintf(w, "\n# ============================================================\n")
+	fmt.Fprintf(w, "# AI embedding\n")
+	fmt.Fprintf(w, "# ============================================================\n")
+	fmt.Fprintf(w, "# Providers: \"gemini\", \"jina\", \"openai\", \"ollama\"\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "[ai]\n")
+	if c.AI.Provider != "" {
+		fmt.Fprintf(w, "embedding_provider = %q\n", c.AI.Provider)
+	} else {
+		fmt.Fprintf(w, "# embedding_provider = \"gemini\"\n")
+	}
+	if c.AI.APIKey != "" {
+		fmt.Fprintf(w, "api_key = %q\n", c.AI.APIKey)
+	} else {
+		fmt.Fprintf(w, "# api_key = \"your-api-key\"\n")
+	}
+
+	return nil
 }

@@ -80,21 +80,39 @@ func runAdd(rawURL string, note string, tags string) error {
 	}
 	fmt.Printf("  ✓ Saved: %s (%s)\n", displayName, bm.SiteName)
 
-	// 添加标签
+	// Build tag list: user tags + domain auto-tag
+	var tagList []string
 	if tags != "" {
-		var tagList []string
 		for _, t := range strings.Split(tags, ",") {
 			t = strings.TrimSpace(t)
 			if t != "" {
 				tagList = append(tagList, t)
 			}
 		}
-		if len(tagList) > 0 {
-			if err := db.AddTagsToBookmark(Store.DB, bm.ID, tagList); err != nil {
-				return fmt.Errorf("tag failed: %w", err)
+	}
+
+	// Domain auto-tag from config
+	if Cfg != nil && len(Cfg.DomainTags) > 0 {
+		domain := meta.ExtractDomain(rawURL)
+		if autoTag, ok := Cfg.DomainTags[domain]; ok && autoTag != "" {
+			found := false
+			for _, t := range tagList {
+				if t == autoTag {
+					found = true
+					break
+				}
 			}
-			fmt.Printf("  ✓ Tagged: %s\n", strings.Join(tagList, ", "))
+			if !found {
+				tagList = append(tagList, autoTag)
+			}
 		}
+	}
+
+	if len(tagList) > 0 {
+		if err := db.AddTagsToBookmark(Store.DB, bm.ID, tagList); err != nil {
+			return fmt.Errorf("tag failed: %w", err)
+		}
+		fmt.Printf("  ✓ Tagged: %s\n", strings.Join(tagList, ", "))
 	}
 
 	return nil

@@ -86,6 +86,40 @@ func TestNeedsSync(t *testing.T) {
 	}
 }
 
+func TestDomainTags_DefaultValues(t *testing.T) {
+	cfg := Default()
+	if cfg.DomainTags == nil {
+		t.Fatal("DomainTags should have default values")
+	}
+	if cfg.DomainTags["x.com"] != "x" {
+		t.Errorf("expected x.com → x, got %q", cfg.DomainTags["x.com"])
+	}
+	if cfg.DomainTags["github.com"] != "github" {
+		t.Errorf("expected github.com → github, got %q", cfg.DomainTags["github.com"])
+	}
+}
+
+func TestDomainTags_SaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Dir: dir,
+		DomainTags: map[string]string{
+			"example.com": "example",
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	loaded := &Config{Dir: dir}
+	if err := loaded.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.DomainTags["example.com"] != "example" {
+		t.Errorf("expected example.com → example after round-trip, got %q", loaded.DomainTags["example.com"])
+	}
+}
+
 func TestSaveLoadWithNewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{
