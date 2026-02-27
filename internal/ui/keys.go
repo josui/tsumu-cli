@@ -15,5 +15,7 @@ const (
 	keyEnter = "enter"
 	keyTag   = "t" // 给选中项打标签
 	keyFav   = "f" // 收藏/取消收藏选中项
-	keyDel   = "d" // 删除选中项
+	keyDel        = "d" // 删除选中项
+	keyNote       = "n" // 编辑选中项的 note（内联）
+	keyNoteEditor = "N" // 用外部编辑器编辑 note
 )

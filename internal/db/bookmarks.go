@@ -120,6 +120,27 @@ func ToggleFavorite(db *sql.DB, id string) (bool, error) {
 	return isFav, nil
 }
 
+// UpdateNote updates a bookmark's note text.
+func UpdateNote(db *sql.DB, id string, note string) error {
+	result, err := db.Exec(
+		`UPDATE bookmarks
+		 SET note = ?,
+		     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE id = ?`, note, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update note failed: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check affected rows failed: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("bookmark not found: %s", id)
+	}
+	return nil
+}
+
 // DeleteBookmark 删除指定书签。bookmark_tags 通过 ON DELETE CASCADE 自动清理。
 func DeleteBookmark(db *sql.DB, id string) error {
 	result, err := db.Exec(`DELETE FROM bookmarks WHERE id = ?`, id)

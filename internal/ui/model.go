@@ -14,9 +14,11 @@ package ui
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -33,6 +35,7 @@ type inputMode int
 const (
 	modeNormal  inputMode = iota // 普通模式：j/k/Enter/d/f/t/q 即时操作
 	modeTag                      // 标签输入模式：输入标签文本，Enter 提交
+	modeNote                     // Note 编辑模式：输入 note 文本，Enter 提交
 	modeConfirm                  // 删除确认模式：y 确认，其他键取消
 )
 
@@ -56,8 +59,9 @@ type Model struct {
 	since   string // 时间筛选（ISO 时间字符串）
 	tag     string // 按标签筛选
 
-	message string // 底部反馈消息
-	isError bool   // message 是否为错误消息
+	message       string // 底部反馈消息
+	isError       bool   // message 是否为错误消息
+	cursorVisible bool   // 输入模式光标闪烁状态
 
 	width int // 终端宽度
 }
@@ -107,6 +111,21 @@ type openResultMsg struct {
 type actionResultMsg struct {
 	message string
 	isError bool
+}
+
+// editorFinishedMsg is sent when the external editor process exits
+type editorFinishedMsg struct {
+	note string
+	err  error
+}
+
+// cursorBlinkMsg 触发光标闪烁
+type cursorBlinkMsg struct{}
+
+func cursorBlink() tea.Cmd {
+	return tea.Tick(530*time.Millisecond, func(time.Time) tea.Msg {
+		return cursorBlinkMsg{}
+	})
 }
 
 // ============================================================
@@ -201,6 +220,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case editorFinishedMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Editor failed: %v", msg.err)
+			m.isError = true
+			return m, nil
+		}
+		return m, m.doUpdateNote(msg.note)
+
+	case cursorBlinkMsg:
+		if m.mode == modeTag || m.mode == modeNote {
+			m.cursorVisible = !m.cursorVisible
+			return m, cursorBlink()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -226,6 +260,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmKey(key)
 	case modeTag:
 		return m.handleTagKey(key)
+	case modeNote:
+		return m.handleNoteKey(key)
 	default:
 		return m.handleNormalKey(key)
 	}
@@ -289,6 +325,26 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 			m.mode = modeTag
 			m.input = ""
 			m.message = ""
+			m.cursorVisible = true
+			return m, cursorBlink()
+		}
+		return m, nil
+
+	// 进入 note 编辑模式（内联）
+	case keyNote:
+		if bm := m.focusedBookmark(); bm != nil {
+			m.mode = modeNote
+			m.input = bm.Note // 预填充已有 note
+			m.message = ""
+			m.cursorVisible = true
+			return m, cursorBlink()
+		}
+		return m, nil
+
+	// 用外部编辑器编辑 note
+	case keyNoteEditor:
+		if bm := m.focusedBookmark(); bm != nil {
+			return m, m.doEditNoteExternal(bm.Note)
 		}
 		return m, nil
 	}
@@ -353,8 +409,40 @@ func (m Model) handleTagKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
-		// 累积输入字符（过滤控制键）
-		if len(key) == 1 || key == " " {
+		// 累积输入字符：接受单字节 ASCII 和 IME 输入的多字节字符（中文等）
+		// ASCII 控制序列（tab/up/f1 等）全由 <0x80 字节组成，首字节 >= 0x80 必为 UTF-8
+		if len(key) > 0 && (len(key) == 1 || key[0] >= 0x80) {
+			m.input += key
+		}
+		return m, nil
+	}
+}
+
+// handleNoteKey 处理 note 输入模式的按键
+func (m Model) handleNoteKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case keyEsc:
+		m.mode = modeNormal
+		m.input = ""
+		m.message = ""
+		return m, nil
+
+	case keyEnter:
+		m.mode = modeNormal
+		note := strings.TrimSpace(m.input)
+		m.input = ""
+		return m, m.doUpdateNote(note)
+
+	case "backspace":
+		if len(m.input) > 0 {
+			runes := []rune(m.input)
+			m.input = string(runes[:len(runes)-1])
+		}
+		return m, nil
+
+	default:
+		// 累积输入字符：接受单字节 ASCII 和 IME 输入的多字节字符（中文等）
+		if len(key) > 0 && (len(key) == 1 || key[0] >= 0x80) {
 			m.input += key
 		}
 		return m, nil
@@ -432,6 +520,77 @@ func (m Model) doAddTags(tags []string) tea.Cmd {
 	}
 }
 
+func (m Model) doUpdateNote(note string) tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+
+	return func() tea.Msg {
+		if err := db.UpdateNote(m.db, id, note); err != nil {
+			return actionResultMsg{message: fmt.Sprintf("Note update failed: %v", err), isError: true}
+		}
+		if note == "" {
+			return actionResultMsg{message: "✓ Note cleared"}
+		}
+		return actionResultMsg{message: "✓ Note updated"}
+	}
+}
+
+// resolveEditor returns the editor command from $EDITOR, with fallbacks.
+func resolveEditor() string {
+	if editor := os.Getenv("EDITOR"); editor != "" {
+		return editor
+	}
+	for _, name := range []string{"vim", "vi", "nano"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return name
+		}
+	}
+	return "vi"
+}
+
+func (m Model) doEditNoteExternal(currentNote string) tea.Cmd {
+	f, err := os.CreateTemp("", "tsumu-note-*.txt")
+	if err != nil {
+		return func() tea.Msg {
+			return editorFinishedMsg{err: fmt.Errorf("create temp file: %w", err)}
+		}
+	}
+	tmpFile := f.Name()
+
+	if _, err := f.WriteString(currentNote); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return func() tea.Msg {
+			return editorFinishedMsg{err: fmt.Errorf("write temp file: %w", err)}
+		}
+	}
+	f.Close()
+
+	editor := resolveEditor()
+	c := exec.Command(editor, tmpFile)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(tmpFile)
+
+		if err != nil {
+			return editorFinishedMsg{err: err}
+		}
+
+		content, readErr := os.ReadFile(tmpFile)
+		if readErr != nil {
+			return editorFinishedMsg{err: fmt.Errorf("read temp file: %w", readErr)}
+		}
+
+		return editorFinishedMsg{note: strings.TrimSpace(string(content))}
+	})
+}
+
 func (m Model) doDelete() tea.Cmd {
 	bm := m.focusedBookmark()
 	if bm == nil {
@@ -507,14 +666,25 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
+	// 输入光标
+	cursor := " "
+	if m.cursorVisible {
+		cursor = "█"
+	}
+
 	// 标签输入提示
 	if m.mode == modeTag {
-		b.WriteString(fmt.Sprintf("  tags> %s\n", m.input))
+		b.WriteString(fmt.Sprintf("  tags> %s%s\n", m.input, cursor))
+	}
+
+	// Note 输入提示
+	if m.mode == modeNote {
+		b.WriteString(fmt.Sprintf("  note> %s%s\n", m.input, cursor))
 	}
 
 	// 操作提示
 	if m.mode == modeNormal {
-		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [j]↓ [k]↑  [q] quit"))
+		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [n] note  [j]↓ [k]↑  [q] quit"))
 		b.WriteString("\n")
 	}
 
