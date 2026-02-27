@@ -8,6 +8,7 @@ package cmd
 import (
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -19,6 +20,10 @@ import (
 var (
 	flagAdd    string // -a <url>
 	flagSearch string // -s <query>
+	flagTag    string // -t <tag>
+	flagToday  bool
+	flagWeek   bool
+	flagMonth  bool
 )
 
 // Store 是全局数据库 Store，由 main.go 注入。
@@ -36,9 +41,14 @@ Save links fast, find them faster.
 
 Usage:
   tsumu                          list all bookmarks
+  tsumu --today / --week / --month  filter by time range
   tsumu add <url> [note...]      add bookmark
+  tsumu add -t <tags> <url>      add bookmark with tags
   tsumu find <query>             search bookmarks
   tsumu find -d <query>          search (detailed)
+  tsumu fav                      list favorites
+  tsumu update                   update to latest version
+  tsumu sync                     sync with Turso cloud
 
 Shortcuts:
   tsumu -a <url> [note...]       add bookmark
@@ -50,16 +60,28 @@ Shortcuts:
 		// -a 快捷方式
 		if flagAdd != "" {
 			note := strings.Join(args, " ")
-			return runAdd(flagAdd, note)
+			return runAdd(flagAdd, note, "")
 		}
 
 		// -s 快捷方式
 		if flagSearch != "" {
-			return runSearch(flagSearch, false)
+			return runSearch(flagSearch, false, "", "")
 		}
 
-		// 无参数：列出全部书签
-		return runSearch("", false)
+		// 时间筛选
+		var since string
+		now := time.Now()
+		switch {
+		case flagToday:
+			since = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UTC().Format(time.RFC3339)
+		case flagWeek:
+			since = now.AddDate(0, 0, -7).UTC().Format(time.RFC3339)
+		case flagMonth:
+			since = now.AddDate(0, -1, 0).UTC().Format(time.RFC3339)
+		}
+
+		// 无参数：列出全部书签（或按时间/标签筛选）
+		return runSearch("", false, since, flagTag)
 	},
 }
 
@@ -70,13 +92,13 @@ var addCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		url := args[0]
-		note := strings.Join(args[1:], " ")
-		return runAdd(url, note)
+		note := addNote
+		if note == "" {
+			note = strings.Join(args[1:], " ")
+		}
+		return runAdd(url, note, addTags)
 	},
 }
-
-// find flag
-var findDetailed bool
 
 // findCmd 是 tsumu find <query> 子命令。
 var findCmd = &cobra.Command{
@@ -84,7 +106,7 @@ var findCmd = &cobra.Command{
 	Short: "Search bookmarks",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSearch(args[0], findDetailed)
+		return runSearch(args[0], false, "", "")
 	},
 }
 
@@ -100,11 +122,16 @@ func init() {
 	rootCmd.Flags().StringVarP(&flagAdd, "add", "a", "", "add bookmark: tsumu -a <url>")
 	rootCmd.Flags().StringVarP(&flagSearch, "search", "s", "", "search bookmarks: tsumu -s <query>")
 
-	// find 子命令的 flag
-	findCmd.Flags().BoolVarP(&findDetailed, "detailed", "d", false, "detailed mode")
+	// 筛选 flag
+	rootCmd.Flags().StringVarP(&flagTag, "tag", "t", "", "filter by tag name: tsumu -t <tag>")
+	rootCmd.Flags().BoolVar(&flagToday, "today", false, "show bookmarks added today")
+	rootCmd.Flags().BoolVar(&flagWeek, "week", false, "show bookmarks added this week")
+	rootCmd.Flags().BoolVar(&flagMonth, "month", false, "show bookmarks added this month")
 
 	// 注册子命令
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(findCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(favCmd)
+	rootCmd.AddCommand(updateCmd)
 }
