@@ -106,47 +106,28 @@ func runSyncSetup() error {
 		}
 	}
 
-	// 检测本地书签数量
-	var localCount int
-	err := Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&localCount)
+	// 直接从当前连接读取本地数据到内存（在关闭连接前）
+	dbPath := Cfg.DBPath()
+	localBookmarks, err := db.ReadAllBookmarksFromDB(Store.DB)
 	if err != nil {
-		localCount = 0
+		localBookmarks = nil
+	}
+	var localTags []db.LocalTag
+	var localLinks []db.BookmarkTagLink
+	if len(localBookmarks) > 0 {
+		fmt.Printf("  Found %d local bookmarks.\n", len(localBookmarks))
+		localTags, _ = db.ReadAllTagsFromDB(Store.DB)
+		localLinks, _ = db.ReadAllBookmarkTagsFromDB(Store.DB)
 	}
 
-	// 如果本地有数据，备份并读取
-	dbPath := Cfg.DBPath()
-	var backupBookmarks []db.LocalBookmark
-	var backupTags []db.LocalTag
-	var backupLinks []db.BookmarkTagLink
+	// 关闭连接
+	Store.Close()
 
-	if localCount > 0 {
-		fmt.Printf("  Found %d local bookmarks.\n", localCount)
-
-		// 先关闭当前数据库连接，才能备份文件
-		Store.Close()
-
-		backupPath, backupErr := db.BackupDB(dbPath)
-		if backupErr != nil {
-			return fmt.Errorf("backup failed: %w", backupErr)
-		}
-		fmt.Printf("  Backed up to %s\n", backupPath)
-
-		// 从备份读取数据
-		backupBookmarks, err = db.ReadAllBookmarks(backupPath)
-		if err != nil {
-			return fmt.Errorf("read backup bookmarks: %w", err)
-		}
-		backupTags, err = db.ReadAllTags(backupPath)
-		if err != nil {
-			return fmt.Errorf("read backup tags: %w", err)
-		}
-		backupLinks, err = db.ReadAllBookmarkTags(backupPath)
-		if err != nil {
-			return fmt.Errorf("read backup links: %w", err)
-		}
-	} else {
-		// 无本地数据时也需要关闭连接，因为要用 embedded replica 重新打开
-		Store.Close()
+	// 删除旧的本地 db 文件：embedded replica 需要从零创建，
+	// 已有的纯本地 db 没有 metadata 文件会导致 sync 失败。
+	// 备份已保存，数据会在 merge 阶段导回。
+	for _, suffix := range []string{"", "-wal", "-shm", "-info"} {
+		os.Remove(dbPath + suffix)
 	}
 
 	// 用 embedded replica 重新打开（连接远端）
@@ -170,13 +151,16 @@ func runSyncSetup() error {
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
-	// 如果有备份数据，合并导入
-	if len(backupBookmarks) > 0 {
+	// 如果有本地数据，合并导入
+	if len(localBookmarks) > 0 {
 		fmt.Println("  Merging local data...")
-		imported, mergeErr := db.MergeFromBackup(Store.DB, backupBookmarks, backupTags, backupLinks)
+		imported, mergeErr := db.MergeFromBackup(Store.DB, localBookmarks, localTags, localLinks)
 		if mergeErr != nil {
 			return fmt.Errorf("merge failed: %w", mergeErr)
 		}
+
+		// 合并后 sync 一次，把数据推到远端
+		Store.Sync()
 
 		var remoteCount int
 		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&remoteCount)

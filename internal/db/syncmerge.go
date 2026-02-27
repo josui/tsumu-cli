@@ -148,6 +148,71 @@ func ReadAllBookmarkTags(dbPath string) ([]BookmarkTagLink, error) {
 	return links, rows.Err()
 }
 
+// ReadAllBookmarksFromDB 从已打开的 *sql.DB 读取所有书签（内存读取，不走文件）
+func ReadAllBookmarksFromDB(database *sql.DB) ([]LocalBookmark, error) {
+	rows, err := database.Query(`
+		SELECT id, url, title, description, note, site_name, tags_text,
+		       click_count, is_favorite, source, created_at, updated_at
+		FROM bookmarks
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query bookmarks: %w", err)
+	}
+	defer rows.Close()
+
+	var bookmarks []LocalBookmark
+	for rows.Next() {
+		var bm LocalBookmark
+		if err := rows.Scan(
+			&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note,
+			&bm.SiteName, &bm.TagsText, &bm.ClickCount, &bm.IsFavorite,
+			&bm.Source, &bm.CreatedAt, &bm.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan bookmark: %w", err)
+		}
+		bookmarks = append(bookmarks, bm)
+	}
+	return bookmarks, rows.Err()
+}
+
+// ReadAllTagsFromDB 从已打开的 *sql.DB 读取所有标签
+func ReadAllTagsFromDB(database *sql.DB) ([]LocalTag, error) {
+	rows, err := database.Query(`SELECT id, name FROM tags`)
+	if err != nil {
+		return nil, fmt.Errorf("query tags: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []LocalTag
+	for rows.Next() {
+		var t LocalTag
+		if err := rows.Scan(&t.ID, &t.Name); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+// ReadAllBookmarkTagsFromDB 从已打开的 *sql.DB 读取所有书签-标签关联
+func ReadAllBookmarkTagsFromDB(database *sql.DB) ([]BookmarkTagLink, error) {
+	rows, err := database.Query(`SELECT bookmark_id, tag_id FROM bookmark_tags`)
+	if err != nil {
+		return nil, fmt.Errorf("query bookmark_tags: %w", err)
+	}
+	defer rows.Close()
+
+	var links []BookmarkTagLink
+	for rows.Next() {
+		var l BookmarkTagLink
+		if err := rows.Scan(&l.BookmarkID, &l.TagID); err != nil {
+			return nil, fmt.Errorf("scan bookmark_tag: %w", err)
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
 // MergeFromBackup 将备份中远端没有的数据导入到当前数据库。
 // 使用 INSERT OR IGNORE 避免 URL 冲突（远端已有的跳过）。
 // 返回导入的书签数。

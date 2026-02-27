@@ -93,8 +93,6 @@ CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
     VALUES (new.rowid, new.title, new.description, new.note, new.site_name, new.tags_text);
 END;
 
--- 设置 migration 版本号
-PRAGMA user_version = 1;
 `
 
 // Store 包装数据库连接和可选的 sync connector。
@@ -201,17 +199,15 @@ func OpenStore(dbPath string, syncOpts *SyncOpts) (*Store, error) {
 	return store, nil
 }
 
-// migrate 检查数据库版本并执行必要的 migration。
-// 使用 PRAGMA user_version 做版本控制，确保幂等。
+// migrate 检查数据库并执行必要的 migration。
+// 使用表存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
+// migrationV1 的所有语句都用 IF NOT EXISTS，天然幂等。
 func migrate(db *sql.DB) error {
-	var version int
-	// PRAGMA 不支持 ? 占位符，直接拼接（这里没有用户输入，安全）
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("failed to read user_version: %w", err)
-	}
-
-	// 已经是最新版本，跳过
-	if version >= 1 {
+	// 检查 bookmarks 表是否存在，存在则跳过
+	var tableName string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'`).Scan(&tableName)
+	if err == nil {
+		// 表已存在，migration 已执行过
 		return nil
 	}
 
