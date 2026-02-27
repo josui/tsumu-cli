@@ -32,13 +32,14 @@ make build
 
 ```
 tsumu                          list all bookmarks (TUI)
-tsumu add <url> [note...]      add bookmark
+tsumu <query>                  search bookmarks
+tsumu -f                       favorites only
+tsumu -d / -w / -m             today / this week / this month
+tsumu -t <tag>                 filter by tag
+tsumu -r                       open a random bookmark
+tsumu add <url>                add bookmark
 tsumu add <url> -t a,b -n "x"  add bookmark with tags and note
-tsumu find <query>             search bookmarks
-tsumu fav                      list favorite bookmarks
-tsumu --today                  bookmarks added today
-tsumu --week                   bookmarks added this week
-tsumu --month                  bookmarks added this month
+tsumu sync                     sync with Turso cloud
 tsumu update                   update to latest version
 ```
 
@@ -53,10 +54,10 @@ Automatically fetches page title, description, and site name via OGP tags.
 ### Search bookmarks
 
 ```bash
-tsumu find design
+tsumu design
 ```
 
-Opens an interactive TUI with search results.
+Opens an interactive TUI with search results. Combine with flags: `tsumu design -f` to search favorites.
 
 **TUI keybindings:**
 

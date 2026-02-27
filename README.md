@@ -32,13 +32,14 @@ make build
 
 ```
 tsumu                          列出所有书签（TUI）
-tsumu add <url> [备注...]      添加书签
+tsumu <query>                  搜索书签
+tsumu -f                       仅显示收藏
+tsumu -d / -w / -m             今天 / 本周 / 本月
+tsumu -t <tag>                 按标签筛选
+tsumu -r                       随机打开一个书签
+tsumu add <url>                添加书签
 tsumu add <url> -t a,b -n "x"  添加书签（含标签和备注）
-tsumu find <query>             搜索书签
-tsumu fav                      列出收藏书签
-tsumu --today                  今天添加的书签
-tsumu --week                   最近一周的书签
-tsumu --month                  最近一个月的书签
+tsumu sync                     云端同步
 tsumu update                   更新到最新版本
 ```
 
@@ -53,10 +54,10 @@ tsumu add https://example.com
 ### 搜索书签
 
 ```bash
-tsumu find design
+tsumu design
 ```
 
-打开交互式 TUI 搜索结果界面。
+打开交互式 TUI 搜索结果界面。支持组合筛选：`tsumu design -f` 搜索收藏中的书签。
 
 **TUI 快捷键：**
 
