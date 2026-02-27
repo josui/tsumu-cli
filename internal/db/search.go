@@ -1,31 +1,18 @@
 // cli/internal/db/search.go
 
 // search.go 负责 FTS5 全文搜索查询。
-// 支持默认模式（快速）和详细模式（含 tags、完整信息）。
+// 始终 LEFT JOIN tags 表，返回完整的书签信息（含标签）。
 
 package db
 
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
-// searchDefaultSQL 是默认搜索查询。
-// JOIN bookmarks_fts 做全文匹配，按 FTS5 的 rank 排序（相关度）。
-const searchDefaultSQL = `
-SELECT b.id, b.url, b.title, b.site_name,
-       b.click_count, b.is_favorite, b.note, b.description,
-       b.source, b.created_at
-FROM bookmarks_fts fts
-JOIN bookmarks b ON b.rowid = fts.rowid
-WHERE bookmarks_fts MATCH ?
-ORDER BY rank
-LIMIT ? OFFSET ?
-`
-
-// searchDetailedSQL 是详细搜索查询。
-// 额外 LEFT JOIN tags 表获取标签名，用 GROUP_CONCAT 拼成字符串。
-const searchDetailedSQL = `
+// searchSQL 是 FTS5 搜索查询（含 tags）。
+const searchSQL = `
 SELECT b.id, b.url, b.title, b.site_name,
        b.click_count, b.is_favorite, b.note, b.description,
        b.source, b.created_at,
@@ -47,18 +34,8 @@ FROM bookmarks_fts
 WHERE bookmarks_fts MATCH ?
 `
 
-// listDefaultSQL 列出全部书签（无搜索词时使用），按创建时间倒序。
-const listDefaultSQL = `
-SELECT id, url, title, site_name,
-       click_count, is_favorite, note, description,
-       source, created_at
-FROM bookmarks
-ORDER BY created_at DESC
-LIMIT ? OFFSET ?
-`
-
-// listDetailedSQL 列出全部书签（详细模式），额外返回 tags。
-const listDetailedSQL = `
+// listSQL 列出全部书签（含 tags），按创建时间倒序。
+const listSQL = `
 SELECT b.id, b.url, b.title, b.site_name,
        b.click_count, b.is_favorite, b.note, b.description,
        b.source, b.created_at,
@@ -73,33 +50,113 @@ LIMIT ? OFFSET ?
 
 // Search 执行搜索或列出全部书签。
 // query 为空时列出全部，否则使用 FTS5 全文搜索。
-// detailed=true 时额外返回 tags 信息。
+// since 非空时按创建时间筛选，favOnly 为 true 时只返回收藏。
 // 返回值：结果列表、总条数、错误。
-func Search(db *sql.DB, query string, detailed bool, limit, offset int) ([]Bookmark, int, error) {
+func Search(db *sql.DB, query string, limit, offset int, since string, favOnly bool, tag string) ([]Bookmark, int, error) {
 	var total int
 	var rows *sql.Rows
 	var err error
 
 	if query == "" {
 		// 无搜索词：列出全部
-		if err := db.QueryRow(`SELECT COUNT(*) FROM bookmarks`).Scan(&total); err != nil {
+		var wheres []string
+		var args []any
+		if since != "" {
+			wheres = append(wheres, "b.created_at >= ?")
+			args = append(args, since)
+		}
+		if favOnly {
+			wheres = append(wheres, "b.is_favorite = 1")
+		}
+		if tag != "" {
+			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+			args = append(args, tag)
+		}
+
+		whereClause := ""
+		if len(wheres) > 0 {
+			whereClause = "WHERE " + strings.Join(wheres, " AND ")
+		}
+
+		// Count query
+		countQ := "SELECT COUNT(*) FROM bookmarks b " + whereClause
+		if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
 			return nil, 0, fmt.Errorf("count query failed: %w", err)
 		}
-		querySQL := listDefaultSQL
-		if detailed {
-			querySQL = listDetailedSQL
+
+		var querySQL string
+		if whereClause != "" {
+			querySQL = fmt.Sprintf(`
+SELECT b.id, b.url, b.title, b.site_name,
+       b.click_count, b.is_favorite, b.note, b.description,
+       b.source, b.created_at,
+       COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
+FROM bookmarks b
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN tags t ON bt.tag_id = t.id
+%s
+GROUP BY b.id
+ORDER BY b.created_at DESC
+LIMIT ? OFFSET ?`, whereClause)
+		} else {
+			querySQL = listSQL
 		}
-		rows, err = db.Query(querySQL, limit, offset)
+
+		queryArgs := append(args, limit, offset)
+		rows, err = db.Query(querySQL, queryArgs...)
 	} else {
 		// FTS5 全文搜索
-		if err := db.QueryRow(countSQL, query).Scan(&total); err != nil {
-			return nil, 0, fmt.Errorf("count query failed: %w", err)
+		var extraConds string
+		var extraArgs []any
+		if since != "" {
+			extraConds += " AND b.created_at >= ?"
+			extraArgs = append(extraArgs, since)
 		}
-		querySQL := searchDefaultSQL
-		if detailed {
-			querySQL = searchDetailedSQL
+		if favOnly {
+			extraConds += " AND b.is_favorite = 1"
 		}
-		rows, err = db.Query(querySQL, query, limit, offset)
+		if tag != "" {
+			extraConds += " AND b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)"
+			extraArgs = append(extraArgs, tag)
+		}
+
+		// Count query
+		if extraConds != "" {
+			countQ := fmt.Sprintf(`
+SELECT COUNT(*)
+FROM bookmarks_fts fts
+JOIN bookmarks b ON b.rowid = fts.rowid
+WHERE bookmarks_fts MATCH ?%s`, extraConds)
+			countArgs := append([]any{query}, extraArgs...)
+			if err := db.QueryRow(countQ, countArgs...).Scan(&total); err != nil {
+				return nil, 0, fmt.Errorf("count query failed: %w", err)
+			}
+		} else {
+			if err := db.QueryRow(countSQL, query).Scan(&total); err != nil {
+				return nil, 0, fmt.Errorf("count query failed: %w", err)
+			}
+		}
+
+		querySQL := searchSQL
+		if extraConds != "" {
+			querySQL = fmt.Sprintf(`
+SELECT b.id, b.url, b.title, b.site_name,
+       b.click_count, b.is_favorite, b.note, b.description,
+       b.source, b.created_at,
+       COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
+FROM bookmarks_fts fts
+JOIN bookmarks b ON b.rowid = fts.rowid
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN tags t ON bt.tag_id = t.id
+WHERE bookmarks_fts MATCH ?%s
+GROUP BY b.id
+ORDER BY rank
+LIMIT ? OFFSET ?`, extraConds)
+		}
+
+		searchArgs := append([]any{query}, extraArgs...)
+		searchArgs = append(searchArgs, limit, offset)
+		rows, err = db.Query(querySQL, searchArgs...)
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("search query failed: %w", err)
@@ -109,19 +166,11 @@ func Search(db *sql.DB, query string, detailed bool, limit, offset int) ([]Bookm
 	var results []Bookmark
 	for rows.Next() {
 		var bm Bookmark
-		if detailed {
-			err = rows.Scan(
-				&bm.ID, &bm.URL, &bm.Title, &bm.SiteName,
-				&bm.ClickCount, &bm.IsFavorite, &bm.Note, &bm.Description,
-				&bm.Source, &bm.CreatedAt, &bm.Tags,
-			)
-		} else {
-			err = rows.Scan(
-				&bm.ID, &bm.URL, &bm.Title, &bm.SiteName,
-				&bm.ClickCount, &bm.IsFavorite, &bm.Note, &bm.Description,
-				&bm.Source, &bm.CreatedAt,
-			)
-		}
+		err = rows.Scan(
+			&bm.ID, &bm.URL, &bm.Title, &bm.SiteName,
+			&bm.ClickCount, &bm.IsFavorite, &bm.Note, &bm.Description,
+			&bm.Source, &bm.CreatedAt, &bm.Tags,
+		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan row failed: %w", err)
 		}

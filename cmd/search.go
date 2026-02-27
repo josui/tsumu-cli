@@ -14,9 +14,9 @@ import (
 )
 
 // runSearch 启动搜索 TUI。
-func runSearch(query string, detailed bool) error {
+func runSearch(query string, favOnly bool, since string, tag string) error {
 	// 创建 bubbletea Model
-	model := ui.NewModel(Store.DB, query, detailed)
+	model := ui.NewModel(Store.DB, query, favOnly, since, tag)
 
 	// tea.NewProgram 创建 TUI 程序
 	// tea.WithAltScreen: 使用备用屏幕缓冲区（退出时恢复原终端内容）

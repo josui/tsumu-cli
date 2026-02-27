@@ -197,7 +197,7 @@ func TestSearch_Default(t *testing.T) {
 	CreateBookmark(database, "https://coolors.co", "Coolors - Color palette generator", "color tools", "coolors.co", "")
 	CreateBookmark(database, "https://example.com", "Example Site", "nothing special", "example.com", "")
 
-	results, total, err := Search(database, "color", false, 5, 0)
+	results, total, err := Search(database, "color", 5, 0, "", false, "")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestSearch_DetailedMode(t *testing.T) {
 	bm, _ := CreateBookmark(database, "https://coolors.co", "Coolors", "color tools", "coolors.co", "")
 	AddTagsToBookmark(database, bm.ID, []string{"design", "color"})
 
-	results, _, err := Search(database, "color", true, 5, 0)
+	results, _, err := Search(database, "color", 5, 0, "", false, "")
 	if err != nil {
 		t.Fatalf("Search detailed failed: %v", err)
 	}
