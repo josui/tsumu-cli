@@ -65,20 +65,25 @@ type Model struct {
 	isError       bool   // message 是否为错误消息
 	cursorVisible bool   // 输入模式光标闪烁状态
 
-	width int // 终端宽度
+	syncStatus string // sync 状态文本（header 显示用）
+	width      int    // 终端宽度
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string) Model {
+func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string) Model {
+	if pageSize <= 0 {
+		pageSize = 5
+	}
 	return Model{
-		db:      database,
-		query:   query,
-		favOnly: favOnly,
-		since:   since,
-		tag:     tag,
-		pageSize: 5,
-		mode:     modeNormal,
-		width:    80, // 默认值，WindowSizeMsg 到达后会更新
+		db:         database,
+		query:      query,
+		favOnly:    favOnly,
+		since:      since,
+		tag:        tag,
+		pageSize:   pageSize,
+		syncStatus: syncStatus,
+		mode:       modeNormal,
+		width:      80, // 默认值，WindowSizeMsg 到达后会更新
 	}
 }
 
@@ -674,13 +679,16 @@ func (m Model) View() string {
 	} else {
 		header = fmt.Sprintf("tsumu %s", m.query)
 	}
-	pageInfo := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
+	rightParts := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
+	if m.syncStatus != "" {
+		rightParts += "  " + m.syncStatus
+	}
 	cw := m.contentWidth()
-	gap := cw - len(header) - len(pageInfo)
+	gap := cw - len(header) - len(rightParts)
 	if gap < 2 {
 		gap = 2
 	}
-	b.WriteString(headerStyle.Render(header + strings.Repeat(" ", gap) + pageInfo))
+	b.WriteString(headerStyle.Render(header + strings.Repeat(" ", gap) + rightParts))
 	b.WriteString("\n\n")
 
 	// 无结果

@@ -19,11 +19,22 @@ import (
 type Config struct {
 	Dir string // 数据目录路径（例如 ~/.tsumu/）
 
+	// TUI 设置
+	PageSize int `toml:"page_size,omitempty"` // 每页显示条数，默认 5
+
 	// [sync] 段落 — Phase 4 才用，现在预留结构
 	Sync SyncConfig `toml:"sync"`
 
 	// [ai] 段落 — Phase 3 才用，现在预留结构
 	AI AIConfig `toml:"ai"`
+}
+
+// GetPageSize 返回每页条数，0 或未设置时返回默认值 5。
+func (c *Config) GetPageSize() int {
+	if c.PageSize <= 0 {
+		return 5
+	}
+	return c.PageSize
 }
 
 // SyncConfig 是 Turso 云端同步配置（Phase 4）。

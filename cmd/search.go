@@ -10,10 +10,26 @@ import (
 	"github.com/josui/tsumu-cli/internal/ui"
 )
 
+// syncStatusText 返回 TUI header 用的 sync 状态文本。
+func syncStatusText() string {
+	if !Cfg.Sync.Enabled || Cfg.Sync.URL == "" {
+		return ""
+	}
+	if Cfg.Sync.LastSynced == "" {
+		return "not synced"
+	}
+	var pending int
+	Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ?", Cfg.Sync.LastSynced).Scan(&pending)
+	if pending > 0 {
+		return fmt.Sprintf("%d pending", pending)
+	}
+	return "synced ✓"
+}
+
 // runSearch 启动搜索 TUI。
 func runSearch(query string, favOnly bool, since string, tag string) error {
 	// 创建 bubbletea Model
-	model := ui.NewModel(Store.DB, query, favOnly, since, tag)
+	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText())
 
 	// tea.NewProgram 创建 TUI 程序
 	// tea.WithAltScreen: 使用备用屏幕缓冲区（退出时恢复原终端内容）
