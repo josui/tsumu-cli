@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/tursodatabase/go-libsql" // libSQL 驱动 + embedded replica API
 	// 直接 import（不带下划线）会同时执行 init() 注册驱动，
@@ -95,14 +94,70 @@ END;
 
 `
 
-// Store 包装数据库连接和可选的 sync connector。
+// Store 包装数据库连接和可选的 sync 配置。
 // 下游代码通过 Store.DB 获取 *sql.DB，无需关心是否启用了同步。
+// DB 始终以纯本地模式打开（快速启动），sync 时按需创建 connector。
 type Store struct {
 	DB        *sql.DB
-	Connector *libsql.Connector // nil = 纯本地模式
+	Connector *libsql.Connector // 仅 OpenStoreWithConnector 时非 nil
+	dbPath    string
+	syncCfg   *SyncOpts
 }
 
-// Sync 手动触发同步。纯本地模式下为 no-op。
+// SyncNow 按需创建 embedded replica connector，执行同步，然后关闭 connector 重开本地连接。
+// 纯本地模式下为 no-op。
+func (s *Store) SyncNow() (libsql.Replicated, error) {
+	if s.syncCfg == nil {
+		return libsql.Replicated{}, nil
+	}
+
+	// 关闭本地连接，释放文件锁
+	s.DB.Close()
+
+	// 创建临时 embedded replica connector
+	connector, err := libsql.NewEmbeddedReplicaConnector(s.dbPath, s.syncCfg.PrimaryURL,
+		libsql.WithAuthToken(s.syncCfg.AuthToken),
+		libsql.WithReadYourWrites(true),
+	)
+	if err != nil {
+		// 失败时重开本地连接
+		s.reopenLocal()
+		return libsql.Replicated{}, fmt.Errorf("failed to create sync connector: %w", err)
+	}
+
+	rep, syncErr := connector.Sync()
+	connector.Close()
+
+	// 重开本地连接
+	if err := s.reopenLocal(); err != nil {
+		return rep, fmt.Errorf("failed to reopen database after sync: %w", err)
+	}
+
+	return rep, syncErr
+}
+
+// SyncBackground 后台同步：不关闭主 DB 连接，单独创建 connector 同步本地文件。
+// 适用于启动时后台 goroutine，TUI 不中断。
+func (s *Store) SyncBackground() error {
+	if s.syncCfg == nil {
+		return nil
+	}
+
+	connector, err := libsql.NewEmbeddedReplicaConnector(s.dbPath, s.syncCfg.PrimaryURL,
+		libsql.WithAuthToken(s.syncCfg.AuthToken),
+		libsql.WithReadYourWrites(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create sync connector: %w", err)
+	}
+	defer connector.Close()
+
+	_, err = connector.Sync()
+	return err
+}
+
+// Sync 手动触发同步。仅在有 live connector 时使用（OpenStoreWithConnector）。
+// 一般场景应使用 SyncNow()。
 func (s *Store) Sync() (libsql.Replicated, error) {
 	if s.Connector == nil {
 		return libsql.Replicated{}, nil
@@ -123,80 +178,100 @@ func (s *Store) Close() error {
 
 // IsSynced 返回是否启用了云端同步。
 func (s *Store) IsSynced() bool {
-	return s.Connector != nil
+	return s.syncCfg != nil
 }
 
 // SyncOpts 定义 Turso 云端同步选项。nil 表示纯本地模式。
 type SyncOpts struct {
-	PrimaryURL string        // libsql://xxx.turso.io
+	PrimaryURL string // libsql://xxx.turso.io
 	AuthToken  string
-	Interval   time.Duration // 0 = 手动 sync
 }
 
-// OpenStore 打开数据库，返回 Store。
-// syncOpts 为 nil 时使用纯本地模式（与之前的 Open 行为一致）。
+// OpenStore 打开数据库（始终纯本地模式，快速启动）。
+// syncOpts 仅保存配置供 SyncNow() 使用，不会在启动时联网。
 func OpenStore(dbPath string, syncOpts *SyncOpts) (*Store, error) {
-	store := &Store{}
-
+	store := &Store{dbPath: dbPath}
 	if syncOpts != nil && syncOpts.PrimaryURL != "" {
-		// Embedded replica 模式：本地文件 + 远端同步
-		opts := []libsql.Option{
-			libsql.WithAuthToken(syncOpts.AuthToken),
-			libsql.WithReadYourWrites(true),
-		}
-		if syncOpts.Interval > 0 {
-			opts = append(opts, libsql.WithSyncInterval(syncOpts.Interval))
-		}
-		connector, err := libsql.NewEmbeddedReplicaConnector(dbPath, syncOpts.PrimaryURL, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create sync connector: %w", err)
-		}
-		store.Connector = connector
-		store.DB = sql.OpenDB(connector)
-	} else {
-		// 纯本地模式（现有逻辑）
-		// "libsql" 是驱动名，由 go-libsql 包的 init() 注册
-		dsn := "file:" + dbPath
-		database, err := sql.Open("libsql", dsn)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
-		}
-		store.DB = database
+		store.syncCfg = syncOpts
 	}
 
-	// 以下 PRAGMA 和 migration 两种模式共用
-	store.DB.SetMaxOpenConns(1)
-
-	// go-libsql 注意：所有 PRAGMA 都会返回行，必须用 QueryRow + Scan，
-	// 不能用 Exec（会报 "Execute returned rows" 错误）。
-
-	// 设置忙等待超时（毫秒）：其他进程持锁时等待而非立即失败
-	var busyTimeout int
-	if err := store.DB.QueryRow("PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	if err := store.openLocal(); err != nil {
+		return nil, err
 	}
 
-	// 启用 WAL 模式：提升并发读写性能（Write-Ahead Logging）
-	var walMode string
-	if err := store.DB.QueryRow("PRAGMA journal_mode=WAL").Scan(&walMode); err != nil {
+	if err := store.initDB(); err != nil {
 		store.Close()
-		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
-	}
-
-	// 启用外键约束（SQLite 默认关闭）
-	if _, err := store.DB.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
-	}
-
-	// 执行 migration
-	if err := migrate(store.DB); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("migration failed: %w", err)
+		return nil, err
 	}
 
 	return store, nil
+}
+
+// OpenStoreWithConnector 用 embedded replica 打开数据库（会联网）。
+// 仅用于 sync setup 等需要 live connector 的场景。
+func OpenStoreWithConnector(dbPath string, syncOpts *SyncOpts) (*Store, error) {
+	store := &Store{dbPath: dbPath}
+
+	opts := []libsql.Option{
+		libsql.WithAuthToken(syncOpts.AuthToken),
+		libsql.WithReadYourWrites(true),
+	}
+	connector, err := libsql.NewEmbeddedReplicaConnector(dbPath, syncOpts.PrimaryURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sync connector: %w", err)
+	}
+	store.Connector = connector
+	store.DB = sql.OpenDB(connector)
+
+	if err := store.initDB(); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	return store, nil
+}
+
+// openLocal 以纯本地模式打开 DB。
+func (s *Store) openLocal() error {
+	database, err := sql.Open("libsql", "file:"+s.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	s.DB = database
+	return nil
+}
+
+// reopenLocal 关闭后重新以本地模式打开并初始化 PRAGMA。
+func (s *Store) reopenLocal() error {
+	if err := s.openLocal(); err != nil {
+		return err
+	}
+	return s.initDB()
+}
+
+// initDB 设置 PRAGMA 和执行 migration。
+func (s *Store) initDB() error {
+	s.DB.SetMaxOpenConns(1)
+
+	var busyTimeout int
+	if err := s.DB.QueryRow("PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+
+	var walMode string
+	if err := s.DB.QueryRow("PRAGMA journal_mode=WAL").Scan(&walMode); err != nil {
+		return fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+
+	if _, err := s.DB.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		return fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+
+	if err := migrate(s.DB); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	return nil
 }
 
 // migrate 检查数据库并执行必要的 migration。

@@ -59,14 +59,12 @@ func main() {
 		}
 	}
 
-	// 2. 打开数据库（自动执行 migration）
-	// 根据 config 中的 sync 配置决定使用本地模式还是云端同步模式
+	// 2. 打开数据库（始终本地模式，快速启动）
 	var syncOpts *db.SyncOpts
 	if cfg.Sync.Enabled && cfg.Sync.URL != "" {
 		syncOpts = &db.SyncOpts{
 			PrimaryURL: cfg.Sync.URL,
 			AuthToken:  cfg.Sync.AuthToken,
-			Interval:   0,
 		}
 	}
 
@@ -77,10 +75,10 @@ func main() {
 	}
 	defer store.Close()
 
-	// 3. 懒同步：启动时检查 interval，需要时后台同步
+	// 3. 懒同步：启动时检查 interval，需要时后台同步（不阻塞 TUI）
 	if store.IsSynced() && cfg.Sync.NeedsSync() {
 		go func() {
-			if _, err := store.Sync(); err != nil {
+			if err := store.SyncBackground(); err != nil {
 				return
 			}
 			cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)

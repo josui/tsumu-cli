@@ -63,7 +63,7 @@ func runSyncManual() error {
 		return nil
 	}
 
-	rep, err := Store.Sync()
+	rep, err := Store.SyncNow()
 	if err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
@@ -139,9 +139,8 @@ func runSyncSetup() error {
 	syncOpts := &db.SyncOpts{
 		PrimaryURL: url,
 		AuthToken:  token,
-		Interval:   0,
 	}
-	newStore, err := db.OpenStore(dbPath, syncOpts)
+	newStore, err := db.OpenStoreWithConnector(dbPath, syncOpts)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
