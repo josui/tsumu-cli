@@ -93,10 +93,40 @@ func (s *SyncConfig) NeedsSync() bool {
 	return time.Since(last) >= s.ParseInterval()
 }
 
-// AIConfig 是 AI embedding 配置（Phase 3）。
+// AIConfig 是 AI embedding 配置。
 type AIConfig struct {
-	Provider string `toml:"embedding_provider"` // "gemini" | "jina" | "openai" | "ollama"
-	APIKey   string `toml:"api_key"`
+	Provider  string `toml:"provider"`            // "gemini" | "ollama"
+	APIKey    string `toml:"api_key"`              // gemini requires API key
+	Model     string `toml:"model,omitempty"`      // ollama model name, default "nomic-embed-text"
+	Dimension int    `toml:"dimension,omitempty"`   // embedding dimension, default 768
+}
+
+// IsConfigured returns true if AI embedding is set up.
+func (a *AIConfig) IsConfigured() bool {
+	return a.Provider != ""
+}
+
+// GetDimension returns the configured dimension, defaulting to 768.
+func (a *AIConfig) GetDimension() int {
+	if a.Dimension <= 0 {
+		return 768
+	}
+	return a.Dimension
+}
+
+// GetModel returns the configured model name with provider-specific defaults.
+func (a *AIConfig) GetModel() string {
+	if a.Model != "" {
+		return a.Model
+	}
+	switch a.Provider {
+	case "gemini":
+		return "gemini-embedding-001"
+	case "ollama":
+		return "nomic-embed-text"
+	default:
+		return ""
+	}
 }
 
 // Default 返回默认配置，数据目录为 ~/.tsumu/。
@@ -243,20 +273,31 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 
 	// ── ai ──
 	fmt.Fprintf(w, "\n# ============================================================\n")
-	fmt.Fprintf(w, "# AI embedding\n")
+	fmt.Fprintf(w, "# AI semantic search (embedding)\n")
 	fmt.Fprintf(w, "# ============================================================\n")
-	fmt.Fprintf(w, "# Providers: \"gemini\", \"jina\", \"openai\", \"ollama\"\n")
+	fmt.Fprintf(w, "# Providers: \"gemini\", \"ollama\"\n")
+	fmt.Fprintf(w, "# Setup: tsumu config --ai\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[ai]\n")
 	if c.AI.Provider != "" {
-		fmt.Fprintf(w, "embedding_provider = %q\n", c.AI.Provider)
+		fmt.Fprintf(w, "provider = %q\n", c.AI.Provider)
 	} else {
-		fmt.Fprintf(w, "# embedding_provider = \"gemini\"\n")
+		fmt.Fprintf(w, "# provider = \"gemini\"\n")
 	}
 	if c.AI.APIKey != "" {
 		fmt.Fprintf(w, "api_key = %q\n", c.AI.APIKey)
 	} else {
 		fmt.Fprintf(w, "# api_key = \"your-api-key\"\n")
+	}
+	if c.AI.Model != "" {
+		fmt.Fprintf(w, "model = %q\n", c.AI.Model)
+	} else {
+		fmt.Fprintf(w, "# model = \"gemini-embedding-001\"\n")
+	}
+	if c.AI.Dimension > 0 {
+		fmt.Fprintf(w, "dimension = %d\n", c.AI.Dimension)
+	} else {
+		fmt.Fprintf(w, "# dimension = 768\n")
 	}
 
 	return nil

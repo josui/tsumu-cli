@@ -120,6 +120,58 @@ func TestDomainTags_SaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAIConfig_IsConfigured(t *testing.T) {
+	tests := []struct {
+		cfg  AIConfig
+		want bool
+	}{
+		{AIConfig{}, false},
+		{AIConfig{Provider: "gemini", APIKey: "key"}, true},
+		{AIConfig{Provider: "ollama"}, true},
+	}
+	for _, tt := range tests {
+		if got := tt.cfg.IsConfigured(); got != tt.want {
+			t.Errorf("IsConfigured() = %v, want %v for %+v", got, tt.want, tt.cfg)
+		}
+	}
+}
+
+func TestAIConfig_GetDimension(t *testing.T) {
+	tests := []struct {
+		dim  int
+		want int
+	}{
+		{0, 768},
+		{-1, 768},
+		{1024, 1024},
+	}
+	for _, tt := range tests {
+		cfg := AIConfig{Dimension: tt.dim}
+		if got := cfg.GetDimension(); got != tt.want {
+			t.Errorf("GetDimension() = %d, want %d", got, tt.want)
+		}
+	}
+}
+
+func TestAIConfig_GetModel(t *testing.T) {
+	tests := []struct {
+		provider string
+		model    string
+		want     string
+	}{
+		{"gemini", "", "gemini-embedding-001"},
+		{"ollama", "", "nomic-embed-text"},
+		{"ollama", "custom-model", "custom-model"},
+		{"", "", ""},
+	}
+	for _, tt := range tests {
+		cfg := AIConfig{Provider: tt.provider, Model: tt.model}
+		if got := cfg.GetModel(); got != tt.want {
+			t.Errorf("GetModel() = %q, want %q", got, tt.want)
+		}
+	}
+}
+
 func TestSaveLoadWithNewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{
