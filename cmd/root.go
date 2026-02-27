@@ -107,10 +107,5 @@ func init() {
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(updateCmd)
-	rootCmd.AddCommand(tagsCmd)
-	rootCmd.AddCommand(importCmd)
-	rootCmd.AddCommand(exportCmd)
-	rootCmd.AddCommand(checkCmd)
-	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(completionCmd)
 }
