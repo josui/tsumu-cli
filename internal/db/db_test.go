@@ -2,49 +2,48 @@
 package db
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
 
-func TestOpen_CreatesTables(t *testing.T) {
-	// 使用临时目录的数据库文件
+// openTestDB 是测试用的辅助函数，打开纯本地模式的数据库。
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	database, err := Open(dbPath)
+	store, err := OpenStore(dbPath, nil)
 	if err != nil {
-		t.Fatalf("Open failed: %v", err)
+		t.Fatalf("OpenStore failed: %v", err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { store.Close() })
+	return store.DB
+}
 
-	// 验证表存在：go-libsql 的 Exec 不接受返回行的语句（SELECT），
-	// 必须用 QueryRow + Scan 来执行 SELECT
+func TestOpen_CreatesTables(t *testing.T) {
+	database := openTestDB(t)
+
 	var count int
 
-	// 验证 bookmarks 表存在
-	err = database.QueryRow("SELECT count(*) FROM bookmarks").Scan(&count)
+	err := database.QueryRow("SELECT count(*) FROM bookmarks").Scan(&count)
 	if err != nil {
 		t.Fatalf("bookmarks table not created: %v", err)
 	}
 
-	// 验证 tags 表存在
 	err = database.QueryRow("SELECT count(*) FROM tags").Scan(&count)
 	if err != nil {
 		t.Fatalf("tags table not created: %v", err)
 	}
 
-	// 验证 bookmark_tags 表存在
 	err = database.QueryRow("SELECT count(*) FROM bookmark_tags").Scan(&count)
 	if err != nil {
 		t.Fatalf("bookmark_tags table not created: %v", err)
 	}
 
-	// 验证 FTS5 虚拟表存在
 	err = database.QueryRow("SELECT count(*) FROM bookmarks_fts").Scan(&count)
 	if err != nil {
 		t.Fatalf("bookmarks_fts table not created: %v", err)
 	}
 
-	// 验证 user_version 已设置
 	var version int
 	err = database.QueryRow("PRAGMA user_version").Scan(&version)
 	if err != nil {
@@ -59,27 +58,22 @@ func TestOpen_IdempotentMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	// 第一次打开
-	db1, err := Open(dbPath)
+	s1, err := OpenStore(dbPath, nil)
 	if err != nil {
-		t.Fatalf("first Open failed: %v", err)
+		t.Fatalf("first OpenStore failed: %v", err)
 	}
-	db1.Close()
+	s1.Close()
 
 	// 第二次打开（migration 应幂等）
-	db2, err := Open(dbPath)
+	s2, err := OpenStore(dbPath, nil)
 	if err != nil {
-		t.Fatalf("second Open failed: %v", err)
+		t.Fatalf("second OpenStore failed: %v", err)
 	}
-	defer db2.Close()
+	defer s2.Close()
 }
 
 func TestCreateBookmark(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, err := CreateBookmark(database, "https://example.com", "Example", "A test site", "example.com", "")
 	if err != nil {
@@ -98,14 +92,9 @@ func TestCreateBookmark(t *testing.T) {
 }
 
 func TestCreateBookmark_DuplicateURL(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
-	_, err = CreateBookmark(database, "https://example.com", "Example", "", "", "")
+	_, err := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 	if err != nil {
 		t.Fatalf("first create failed: %v", err)
 	}
@@ -118,12 +107,7 @@ func TestCreateBookmark_DuplicateURL(t *testing.T) {
 }
 
 func TestToggleFavorite(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
@@ -149,12 +133,7 @@ func TestToggleFavorite(t *testing.T) {
 }
 
 func TestIncrementClickCount(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
@@ -168,16 +147,11 @@ func TestIncrementClickCount(t *testing.T) {
 }
 
 func TestDeleteBookmark(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
-	err = DeleteBookmark(database, bm.ID)
+	err := DeleteBookmark(database, bm.ID)
 	if err != nil {
 		t.Fatalf("DeleteBookmark failed: %v", err)
 	}
@@ -192,16 +166,11 @@ func TestDeleteBookmark(t *testing.T) {
 }
 
 func TestAddTagsToBookmark(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
-	err = AddTagsToBookmark(database, bm.ID, []string{"design", "color palette"})
+	err := AddTagsToBookmark(database, bm.ID, []string{"design", "color palette"})
 	if err != nil {
 		t.Fatalf("AddTagsToBookmark failed: %v", err)
 	}
@@ -213,29 +182,19 @@ func TestAddTagsToBookmark(t *testing.T) {
 }
 
 func TestAddTagsToBookmark_Idempotent(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://example.com", "Example", "", "", "")
 
 	_ = AddTagsToBookmark(database, bm.ID, []string{"design"})
-	err = AddTagsToBookmark(database, bm.ID, []string{"design", "tool"})
+	err := AddTagsToBookmark(database, bm.ID, []string{"design", "tool"})
 	if err != nil {
 		t.Fatalf("second AddTagsToBookmark failed: %v", err)
 	}
 }
 
 func TestSearch_Default(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	CreateBookmark(database, "https://coolors.co", "Coolors - Color palette generator", "color tools", "coolors.co", "")
 	CreateBookmark(database, "https://example.com", "Example Site", "nothing special", "example.com", "")
@@ -253,12 +212,7 @@ func TestSearch_Default(t *testing.T) {
 }
 
 func TestSearch_DetailedMode(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer database.Close()
+	database := openTestDB(t)
 
 	bm, _ := CreateBookmark(database, "https://coolors.co", "Coolors", "color tools", "coolors.co", "")
 	AddTagsToBookmark(database, bm.ID, []string{"design", "color"})

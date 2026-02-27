@@ -7,10 +7,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/user/tsumu-cli/cmd"
-	"github.com/user/tsumu-cli/config"
-	"github.com/user/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/cmd"
+	"github.com/josui/tsumu-cli/config"
+	"github.com/josui/tsumu-cli/internal/db"
 )
 
 func main() {
@@ -20,20 +21,64 @@ func main() {
 		fmt.Fprintf(os.Stderr, "创建数据目录失败: %v\n", err)
 		os.Exit(1)
 	}
+	// 首次运行检测（在 Load 之前，因为 Load 不会报错如果文件不存在）
+	firstRun := cfg.IsFirstRun()
+
 	if err := cfg.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
 
+	if firstRun {
+		// 写入默认配置（标记为非首次运行）
+		if err := cfg.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
+			os.Exit(1)
+		}
+
+		wantSync := cmd.RunOnboarding()
+		if wantSync {
+			// 先打开本地 DB（sync setup 需要），然后走 sync setup 流程
+			store, err := db.OpenStore(cfg.DBPath(), nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
+				os.Exit(1)
+			}
+			cmd.Store = store
+			cmd.Cfg = cfg
+			if err := cmd.RunSyncSetupFromOnboarding(); err != nil {
+				fmt.Fprintf(os.Stderr, "Sync setup failed: %v\n", err)
+				fmt.Println("  Continuing in local mode. Run tsumu sync --setup to try again.")
+			}
+			store.Close()
+			// setup 完成后重新加载配置（可能已切换到 sync 模式）
+			if err := cfg.Load(); err != nil {
+				fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
+
 	// 2. 打开数据库（自动执行 migration）
-	database, err := db.Open(cfg.DBPath())
+	// 根据 config 中的 sync 配置决定使用本地模式还是云端同步模式
+	var syncOpts *db.SyncOpts
+	if cfg.Sync.Enabled && cfg.Sync.URL != "" {
+		syncOpts = &db.SyncOpts{
+			PrimaryURL: cfg.Sync.URL,
+			AuthToken:  cfg.Sync.AuthToken,
+			Interval:   60 * time.Second,
+		}
+	}
+
+	store, err := db.OpenStore(cfg.DBPath(), syncOpts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer database.Close()
+	defer store.Close()
 
-	// 3. 注入数据库连接到 cmd 包，然后执行命令
-	cmd.DB = database
+	// 3. 注入 Store 到 cmd 包，然后执行命令
+	cmd.Store = store
+	cmd.Cfg = cfg
 	cmd.Execute()
 }

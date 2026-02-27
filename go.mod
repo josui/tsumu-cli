@@ -1,4 +1,4 @@
-module github.com/user/tsumu-cli
+module github.com/josui/tsumu-cli
 
 go 1.25.0
 

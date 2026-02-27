@@ -7,8 +7,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/user/tsumu-cli/internal/db"
-	"github.com/user/tsumu-cli/internal/meta"
+	"github.com/josui/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/internal/meta"
 )
 
 // runAdd 执行添加书签流程：抓元数据 → 写数据库 → 打印结果。
@@ -27,7 +27,7 @@ func runAdd(url string, note string) error {
 	}
 
 	// 写入数据库
-	bm, err := db.CreateBookmark(DB, url, metadata.Title, metadata.Description, metadata.SiteName, note)
+	bm, err := db.CreateBookmark(Store.DB, url, metadata.Title, metadata.Description, metadata.SiteName, note)
 	if err != nil {
 		return fmt.Errorf("save failed: %w", err)
 	}

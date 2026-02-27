@@ -58,6 +58,12 @@ func (c *Config) ConfigPath() string {
 	return filepath.Join(c.Dir, "config.toml")
 }
 
+// IsFirstRun 检测是否首次运行（config.toml 不存在）。
+func (c *Config) IsFirstRun() bool {
+	_, err := os.Stat(c.ConfigPath())
+	return os.IsNotExist(err)
+}
+
 // EnsureDir 确保数据目录存在，不存在则创建。
 // os.MkdirAll 是幂等的：目录已存在时不会报错。
 func (c *Config) EnsureDir() error {

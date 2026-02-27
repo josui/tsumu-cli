@@ -8,10 +8,11 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
-	_ "github.com/tursodatabase/go-libsql" // libSQL 驱动注册：
-	// 下划线 import 表示只执行 init()（注册 SQL 驱动），不直接使用包内的符号。
-	// 这是 Go database/sql 的惯例写法。
+	"github.com/tursodatabase/go-libsql" // libSQL 驱动 + embedded replica API
+	// 直接 import（不带下划线）会同时执行 init() 注册驱动，
+	// 所以不需要再重复下划线 import。
 )
 
 // migrationV1 是初始建表 SQL。
@@ -96,53 +97,108 @@ END;
 PRAGMA user_version = 1;
 `
 
-// Open 打开（或创建）SQLite 数据库，并执行 migration。
-// dbPath 是数据库文件的完整路径（例如 ~/.tsumu/tsumu.db）。
-// 返回的 *sql.DB 是 Go 标准数据库连接池，线程安全，可复用。
-func Open(dbPath string) (*sql.DB, error) {
-	// "libsql" 是驱动名，由 go-libsql 包的 init() 注册
-	// go-libsql 要求 DSN 以 "file:" 开头（本地文件路径）
-	dsn := "file:" + dbPath
-	db, err := sql.Open("libsql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+// Store 包装数据库连接和可选的 sync connector。
+// 下游代码通过 Store.DB 获取 *sql.DB，无需关心是否启用了同步。
+type Store struct {
+	DB        *sql.DB
+	Connector *libsql.Connector // nil = 纯本地模式
+}
+
+// Sync 手动触发同步。纯本地模式下为 no-op。
+func (s *Store) Sync() (libsql.Replicated, error) {
+	if s.Connector == nil {
+		return libsql.Replicated{}, nil
+	}
+	return s.Connector.Sync()
+}
+
+// Close 关闭数据库和 connector。
+func (s *Store) Close() error {
+	if err := s.DB.Close(); err != nil {
+		return err
+	}
+	if s.Connector != nil {
+		return s.Connector.Close()
+	}
+	return nil
+}
+
+// IsSynced 返回是否启用了云端同步。
+func (s *Store) IsSynced() bool {
+	return s.Connector != nil
+}
+
+// SyncOpts 定义 Turso 云端同步选项。nil 表示纯本地模式。
+type SyncOpts struct {
+	PrimaryURL string        // libsql://xxx.turso.io
+	AuthToken  string
+	Interval   time.Duration // 0 = 手动 sync
+}
+
+// OpenStore 打开数据库，返回 Store。
+// syncOpts 为 nil 时使用纯本地模式（与之前的 Open 行为一致）。
+func OpenStore(dbPath string, syncOpts *SyncOpts) (*Store, error) {
+	store := &Store{}
+
+	if syncOpts != nil && syncOpts.PrimaryURL != "" {
+		// Embedded replica 模式：本地文件 + 远端同步
+		opts := []libsql.Option{
+			libsql.WithAuthToken(syncOpts.AuthToken),
+			libsql.WithReadYourWrites(true),
+		}
+		if syncOpts.Interval > 0 {
+			opts = append(opts, libsql.WithSyncInterval(syncOpts.Interval))
+		}
+		connector, err := libsql.NewEmbeddedReplicaConnector(dbPath, syncOpts.PrimaryURL, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sync connector: %w", err)
+		}
+		store.Connector = connector
+		store.DB = sql.OpenDB(connector)
+	} else {
+		// 纯本地模式（现有逻辑）
+		// "libsql" 是驱动名，由 go-libsql 包的 init() 注册
+		dsn := "file:" + dbPath
+		database, err := sql.Open("libsql", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
+		}
+		store.DB = database
 	}
 
-	// 限制连接池为单连接：SQLite 是文件级锁，多连接会导致 "database is locked"
-	db.SetMaxOpenConns(1)
+	// 以下 PRAGMA 和 migration 两种模式共用
+	store.DB.SetMaxOpenConns(1)
 
 	// go-libsql 注意：所有 PRAGMA 都会返回行，必须用 QueryRow + Scan，
 	// 不能用 Exec（会报 "Execute returned rows" 错误）。
 
 	// 设置忙等待超时（毫秒）：其他进程持锁时等待而非立即失败
 	var busyTimeout int
-	if err := db.QueryRow("PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
-		db.Close()
+	if err := store.DB.QueryRow("PRAGMA busy_timeout=5000").Scan(&busyTimeout); err != nil {
+		store.Close()
 		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
 
 	// 启用 WAL 模式：提升并发读写性能（Write-Ahead Logging）
 	var walMode string
-	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&walMode); err != nil {
-		db.Close()
+	if err := store.DB.QueryRow("PRAGMA journal_mode=WAL").Scan(&walMode); err != nil {
+		store.Close()
 		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
 	}
 
 	// 启用外键约束（SQLite 默认关闭）
-	// 注意：PRAGMA foreign_keys=ON 是纯设置操作，不返回行，可以用 Exec。
-	// 而 PRAGMA journal_mode 和 busy_timeout 会返回当前值，必须用 QueryRow。
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		db.Close()
+	if _, err := store.DB.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		store.Close()
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	// 执行 migration
-	if err := migrate(db); err != nil {
-		db.Close()
+	if err := migrate(store.DB); err != nil {
+		store.Close()
 		return nil, fmt.Errorf("migration failed: %w", err)
 	}
 
-	return db, nil
+	return store, nil
 }
 
 // migrate 检查数据库版本并执行必要的 migration。

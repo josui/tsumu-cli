@@ -6,11 +6,13 @@
 package cmd
 
 import (
-	"database/sql"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/josui/tsumu-cli/config"
+	"github.com/josui/tsumu-cli/internal/db"
 )
 
 // root flag 变量（快捷方式，兼容旧写法）
@@ -19,8 +21,11 @@ var (
 	flagSearch string // -s <query>
 )
 
-// DB 是全局数据库连接，由 main.go 注入。
-var DB *sql.DB
+// Store 是全局数据库 Store，由 main.go 注入。
+var Store *db.Store
+
+// Cfg 是全局配置，由 main.go 注入。sync 命令需要读写配置。
+var Cfg *config.Config
 
 // rootCmd 是 cobra 的根命令。
 var rootCmd = &cobra.Command{
@@ -101,4 +106,5 @@ func init() {
 	// 注册子命令
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(findCmd)
+	rootCmd.AddCommand(syncCmd)
 }

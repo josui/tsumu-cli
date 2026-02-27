@@ -1,0 +1,9 @@
+# Build output
+tsumu
+tm
+
+# Internal docs
+docs/
+
+# macOS
+.DS_Store

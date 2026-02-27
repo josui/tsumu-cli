@@ -20,7 +20,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/user/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/internal/db"
 )
 
 // ============================================================
