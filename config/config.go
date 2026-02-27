@@ -7,6 +7,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -25,9 +28,52 @@ type Config struct {
 
 // SyncConfig 是 Turso 云端同步配置（Phase 4）。
 type SyncConfig struct {
-	Enabled   bool   `toml:"enabled"`
-	URL       string `toml:"url"`
-	AuthToken string `toml:"auth_token"`
+	Enabled    bool   `toml:"enabled"`
+	URL        string `toml:"url"`
+	AuthToken  string `toml:"auth_token"`
+	Interval   string `toml:"interval,omitempty"`
+	LastSynced string `toml:"last_synced,omitempty"`
+}
+
+// ParseInterval 将 interval 字符串（例如 "24h", "7d"）解析为 time.Duration。
+// 空字符串或无法解析时返回默认值 24h。
+func (s *SyncConfig) ParseInterval() time.Duration {
+	const defaultInterval = 24 * time.Hour
+	raw := strings.TrimSpace(s.Interval)
+	if raw == "" {
+		return defaultInterval
+	}
+
+	// 支持 "Nd" 格式（天数）
+	if strings.HasSuffix(raw, "d") {
+		days, err := strconv.Atoi(raw[:len(raw)-1])
+		if err != nil || days <= 0 {
+			return defaultInterval
+		}
+		return time.Duration(days) * 24 * time.Hour
+	}
+
+	// 其他情况用标准 time.ParseDuration（支持 "1h", "12h" 等）
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return defaultInterval
+	}
+	return d
+}
+
+// NeedsSync 判断是否需要同步：enabled 且（从未同步 或 距上次同步已超过 interval）。
+func (s *SyncConfig) NeedsSync() bool {
+	if !s.Enabled {
+		return false
+	}
+	if s.LastSynced == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, s.LastSynced)
+	if err != nil {
+		return true
+	}
+	return time.Since(last) >= s.ParseInterval()
 }
 
 // AIConfig 是 AI embedding 配置（Phase 3）。
