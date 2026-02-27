@@ -211,8 +211,21 @@ func runSyncStatus() error {
 		if err == nil {
 			fmt.Printf("  Last:    %s (%s)\n", formatDuration(time.Since(last)), last.Local().Format("2006-01-02 15:04"))
 		}
+
+		// 本地变更检测
+		var total, pending int
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&total)
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ?", Cfg.Sync.LastSynced).Scan(&pending)
+		if pending > 0 {
+			fmt.Printf("  Data:    %d bookmarks pending sync\n", pending)
+		} else {
+			fmt.Printf("  Data:    all synced (%d bookmarks)\n", total)
+		}
 	} else {
 		fmt.Printf("  Last:    never\n")
+		var total int
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&total)
+		fmt.Printf("  Data:    never synced (%d bookmarks)\n", total)
 	}
 	return nil
 }
