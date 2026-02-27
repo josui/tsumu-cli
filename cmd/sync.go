@@ -63,7 +63,7 @@ func runSyncManual() error {
 		return nil
 	}
 
-	rep, err := Store.SyncNow()
+	_, err := Store.SyncNow()
 	if err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
@@ -71,7 +71,7 @@ func runSyncManual() error {
 	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
 	Cfg.Save()
 
-	fmt.Printf("  Synced (%d frames)\n", rep.FramesSynced)
+	fmt.Println("  ✓ Synced")
 	return nil
 }
 
