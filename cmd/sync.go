@@ -20,10 +20,11 @@ import (
 
 // sync flag
 var (
-	syncSetup  bool
-	syncStatus bool
-	syncOff    bool
-	syncForce  bool
+	syncSetup     bool
+	syncStatus    bool
+	syncOff       bool
+	syncForce     bool
+	syncOverwrite bool
 )
 
 // syncCmd 是 tsumu sync 子命令。
@@ -32,8 +33,9 @@ var syncCmd = &cobra.Command{
 	Short: "Manage cloud sync",
 	Long: `Manage Turso cloud sync.
 
-  tsumu sync              manual sync (pull latest changes)
-  tsumu sync --force      force full sync (ignore LWW, overwrite remote)
+  tsumu sync              manual sync (pull + push changes)
+  tsumu sync --force      full resync (pull + push all data)
+  tsumu sync --overwrite  overwrite remote with local data (dangerous)
   tsumu sync --setup      configure Turso sync
   tsumu sync --status     show sync status
   tsumu sync --off        disable sync`,
@@ -48,7 +50,7 @@ var syncCmd = &cobra.Command{
 		if syncOff {
 			return runSyncOff()
 		}
-		// 无 flag 或 --force：手动触发 sync
+		// 无 flag 或 --force/--overwrite：手动触发 sync
 		return runSyncManual()
 	},
 }
@@ -57,35 +59,70 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncSetup, "setup", false, "configure Turso sync")
 	syncCmd.Flags().BoolVar(&syncStatus, "status", false, "show sync status")
 	syncCmd.Flags().BoolVar(&syncOff, "off", false, "disable sync")
-	syncCmd.Flags().BoolVar(&syncForce, "force", false, "force full sync (overwrite remote)")
+	syncCmd.Flags().BoolVar(&syncForce, "force", false, "full resync (pull + push all data)")
+	syncCmd.Flags().BoolVar(&syncOverwrite, "overwrite", false, "overwrite remote with local data (skip pull)")
 }
 
 // runSyncManual 手动触发双向同步。
-// 流程：Pull（远端 → 本地）→ Push（本地 → 远端）→ 更新 last_synced。
 func runSyncManual() error {
-	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
-		fmt.Println("  Sync not configured. Run: tsumu sync --setup")
+	if !Cfg.Sync.CanSync() {
+		if Cfg.Sync.IsEnabled() && Cfg.Sync.GetAuthToken() == "" {
+			fmt.Println("  Sync enabled but auth token not configured. Run: tsumu sync --setup")
+		} else {
+			fmt.Println("  Sync not configured. Run: tsumu sync --setup")
+		}
 		return nil
+	}
+
+	// 互斥校验
+	if syncForce && syncOverwrite {
+		fmt.Println("  Error: --force and --overwrite cannot be used together")
+		return nil
+	}
+
+	// --overwrite 确认
+	if syncOverwrite {
+		fmt.Println("  ⚠ This will overwrite all remote data with local data.")
+		fmt.Println("    Remote-only bookmarks will be deleted.")
+		fmt.Print("    Continue? [y/N]: ")
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println("  Cancelled.")
+			return nil
+		}
 	}
 
 	client := sync.NewClient(Cfg.Sync.GetURL(), Cfg.Sync.GetAuthToken())
 	ctx := context.Background()
 
-	lastSynced := Cfg.Sync.LastSynced
-	if syncForce {
-		lastSynced = ""
-		fmt.Println("  Force sync: full push (overwrite remote)")
+	// 确定同步模式
+	mode := sync.SyncIncremental
+	if syncOverwrite {
+		mode = sync.SyncOverwrite
+		fmt.Println("  Overwrite: push local data to remote (skip pull)")
+	} else if syncForce {
+		mode = sync.SyncFull
+		fmt.Println("  Full resync: pull + push all data")
 	}
 
-	result := sync.SyncAll(ctx, Store.DB, client, lastSynced, syncForce, func(msg string) {
+	result, err := sync.SyncAll(ctx, Store.DB, client, Cfg.Sync.LastSynced, mode, func(msg string) {
 		fmt.Printf("\r  ⠋ %s", msg)
 	})
+
+	// 清除进度行
+	fmt.Print("\r")
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ Sync failed: %v\n", err)
+		fmt.Println("  last_synced not updated. Run `tsumu sync` to retry.")
+		return nil
+	}
 
 	Cfg.Sync.LastSynced = sync.NowUTC()
 	Cfg.Save()
 
-	// 清除进度行，显示结果
-	fmt.Print("\r")
 	pulled := result.PulledNew + result.PulledUpdated
 	pushed := result.PushedNew + result.PushedUpdated
 	if pulled > 0 || pushed > 0 {
@@ -176,10 +213,13 @@ func runSyncSetup() error {
 	fmt.Println("  Syncing...")
 	client := sync.NewClient(actualURL, actualToken)
 	ctx := context.Background()
-	result := sync.SyncAll(ctx, Store.DB, client, "", false, nil)
-
-	Cfg.Sync.LastSynced = sync.NowUTC()
-	Cfg.Save()
+	result, err := sync.SyncAll(ctx, Store.DB, client, "", sync.SyncIncremental, nil)
+	if err == nil {
+		Cfg.Sync.LastSynced = sync.NowUTC()
+		Cfg.Save()
+	} else {
+		fmt.Fprintf(os.Stderr, "  ⚠ Initial sync failed: %v\n", err)
+	}
 
 	pulled := result.PulledNew + result.PulledUpdated
 	pushed := result.PushedNew + result.PushedUpdated
@@ -194,7 +234,7 @@ func runSyncSetup() error {
 
 // runSyncStatus 显示同步状态
 func runSyncStatus() error {
-	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
+	if !Cfg.Sync.CanSync() {
 		fmt.Println("  Status:  disabled")
 		return nil
 	}
@@ -215,12 +255,12 @@ func runSyncStatus() error {
 		}
 
 		// 本地变更检测（排除已 soft delete 的记录）
-		var total, pending int
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE deleted_at IS NULL").Scan(&total)
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ? AND deleted_at IS NULL", Cfg.Sync.LastSynced).Scan(&pending)
+		pending := sync.PendingCount(Store.DB, Cfg.Sync.LastSynced)
 		if pending > 0 {
 			fmt.Printf("  Data:    %d bookmarks pending sync\n", pending)
 		} else {
+			var total int
+			Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE deleted_at IS NULL").Scan(&total)
 			fmt.Printf("  Data:    all synced (%d bookmarks)\n", total)
 		}
 	} else {

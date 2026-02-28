@@ -10,6 +10,23 @@ import (
 	"time"
 )
 
+// SyncMode 定义同步模式。
+type SyncMode int
+
+const (
+	// SyncIncremental 增量同步（默认）。
+	// 仅同步 lastSynced 之后的变更。
+	SyncIncremental SyncMode = iota
+
+	// SyncFull 全量同步（--force）。
+	// Pull 全量 + Push 全量 + 三表孤儿清理。安全的多设备全量重同步。
+	SyncFull
+
+	// SyncOverwrite 本地覆盖远端（--overwrite）。
+	// 跳过 Pull，Push 全量 + 三表孤儿清理。危险操作，需确认。
+	SyncOverwrite
+)
+
 // Result 是同步结果统计。
 type Result struct {
 	PulledNew     int    // pull 阶段新增的记录数
@@ -19,30 +36,46 @@ type Result struct {
 	Warning       string // 同步后校验警告（计数不一致等）
 }
 
-// SyncAll 执行完整的双向同步。
-// lastSynced 为空字符串时表示首次同步，拉取/推送全量。
-// forceUpdate=true 时 Push 阶段忽略 LWW 比较，强制覆盖远端。
-// onProgress 可选回调，用于报告进度（可为 nil）。
-func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string, forceUpdate bool, onProgress func(string)) Result {
+// SyncAll 执行同步。
+// mode 决定同步方式：SyncIncremental（增量）、SyncFull（全量双向）、SyncOverwrite（本地覆盖远端）。
+// 返回 error 时调用方不应更新 last_synced。
+func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string, mode SyncMode, onProgress func(string)) (Result, error) {
 	var result Result
 
-	if onProgress != nil {
-		onProgress("Pulling from remote...")
+	// SyncFull / SyncOverwrite 时清空 lastSynced，触发全量处理
+	effectiveLastSynced := lastSynced
+	if mode == SyncFull || mode == SyncOverwrite {
+		effectiveLastSynced = ""
 	}
 
-	pullResult := Pull(ctx, localDB, client, lastSynced)
-	result.PulledNew = pullResult.New
-	result.PulledUpdated = pullResult.Updated
+	// Pull 阶段（SyncOverwrite 跳过）
+	if mode != SyncOverwrite {
+		if onProgress != nil {
+			onProgress("Pulling from remote...")
+		}
 
-	if onProgress != nil {
-		onProgress(fmt.Sprintf("Pulled: %d new, %d updated", pullResult.New, pullResult.Updated))
+		pullResult, err := Pull(ctx, localDB, client, effectiveLastSynced)
+		if err != nil {
+			return result, fmt.Errorf("pull failed: %w", err)
+		}
+		result.PulledNew = pullResult.New
+		result.PulledUpdated = pullResult.Updated
+
+		if onProgress != nil {
+			onProgress(fmt.Sprintf("Pulled: %d new, %d updated", pullResult.New, pullResult.Updated))
+		}
 	}
 
+	// Push 阶段
 	if onProgress != nil {
 		onProgress("Pushing to remote...")
 	}
 
-	pushResult := Push(ctx, localDB, client, lastSynced, forceUpdate)
+	forceMode := mode == SyncFull || mode == SyncOverwrite
+	pushResult, err := Push(ctx, localDB, client, effectiveLastSynced, forceMode)
+	if err != nil {
+		return result, fmt.Errorf("push failed: %w", err)
+	}
 	result.PushedNew = pushResult.New
 	result.PushedUpdated = pushResult.Updated
 
@@ -50,11 +83,10 @@ func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced st
 		onProgress(fmt.Sprintf("Pushed: %d new, %d updated", pushResult.New, pushResult.Updated))
 	}
 
-	// 同步后校验：比较本地和远端的活跃书签数。
-	// 不一致时设置 Warning，由调用方决定是否显示。
+	// 同步后校验
 	result.Warning = verifyCounts(ctx, localDB, client)
 
-	return result
+	return result, nil
 }
 
 // verifyCounts 比较本地与远端的活跃书签数量。

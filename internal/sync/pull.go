@@ -20,26 +20,36 @@ type PullResult struct {
 
 // Pull 从远端拉取变更数据并合并到本地。
 // lastSynced 为空时拉取全量。
-func Pull(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) PullResult {
+// 返回 error 表示有数据失败（API 级或单条级），调用方不应推进 last_synced。
+func Pull(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) (PullResult, error) {
 	var result PullResult
 
 	// 1. 拉取 bookmarks
-	bNew, bUpd := pullBookmarks(ctx, localDB, client, lastSynced)
+	bNew, bUpd, err := pullBookmarks(ctx, localDB, client, lastSynced)
+	if err != nil {
+		result.New = bNew
+		result.Updated = bUpd
+		return result, fmt.Errorf("pull bookmarks: %w", err)
+	}
 	result.New += bNew
 	result.Updated += bUpd
 
 	// 2. 拉取 tags（全量，INSERT OR IGNORE）
-	pullTags(ctx, localDB, client)
+	if err := pullTags(ctx, localDB, client); err != nil {
+		return result, fmt.Errorf("pull tags: %w", err)
+	}
 
 	// 3. 拉取 bookmark_tags
-	pullBookmarkTags(ctx, localDB, client, lastSynced)
+	if err := pullBookmarkTags(ctx, localDB, client, lastSynced); err != nil {
+		return result, fmt.Errorf("pull bookmark_tags: %w", err)
+	}
 
-	return result
+	return result, nil
 }
 
 // pullBookmarks 拉取远端 bookmarks 并 UPSERT 到本地。
-// 冲突策略：remote.updated_at > local.updated_at 时覆盖本地。
-func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) (newCount, updCount int) {
+// API 调用失败返回 error。单条 INSERT/UPDATE 失败打印 warning 并标记 hasItemError。
+func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) (newCount, updCount int, err error) {
 	q := `SELECT id, url, title, description, note, ai_note, site_name, tags_text,
 	             click_count, is_favorite, source, created_at, updated_at, deleted_at
 	      FROM bookmarks`
@@ -51,10 +61,10 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 
 	res, err := client.ExecuteOne(ctx, q, args...)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ pull bookmarks failed: %v\n", err)
-		return 0, 0
+		return 0, 0, err // API 级错误
 	}
 
+	var hasItemError bool
 	for _, row := range res.Rows {
 		if len(row) < 14 {
 			continue
@@ -62,33 +72,31 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 		id := row[0].Value
 		updatedAt := row[12].Value
 
-		// 检查本地是否存在（包括已 soft delete 的）
 		var localUpdatedAt string
-		err := localDB.QueryRow(`SELECT updated_at FROM bookmarks WHERE id = ?`, id).Scan(&localUpdatedAt)
+		qErr := localDB.QueryRow(`SELECT updated_at FROM bookmarks WHERE id = ?`, id).Scan(&localUpdatedAt)
 
-		if err == sql.ErrNoRows {
-			// 本地不存在，INSERT
+		if qErr == sql.ErrNoRows {
 			clickCount, _ := strconv.Atoi(row[8].Value)
 			isFavorite, _ := strconv.Atoi(row[9].Value)
 
-			_, err = localDB.Exec(
+			_, iErr := localDB.Exec(
 				`INSERT INTO bookmarks (id, url, title, description, note, ai_note, site_name, tags_text,
 				                        click_count, is_favorite, source, created_at, updated_at, deleted_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				id, row[1].Value, row[2].Value, row[3].Value, row[4].Value, row[5].Value,
 				row[6].Value, row[7].Value, clickCount, isFavorite,
 				row[10].Value, row[11].Value, updatedAt, nullableText(row[13]))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ pull insert failed [%s]: %v\n", id[:8], err)
+			if iErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ pull insert failed [%s]: %v\n", id[:8], iErr)
+				hasItemError = true
 			} else {
 				newCount++
 			}
-		} else if err == nil && updatedAt > localUpdatedAt {
-			// 远端更新时间更新，覆盖本地
+		} else if qErr == nil && updatedAt > localUpdatedAt {
 			clickCount, _ := strconv.Atoi(row[8].Value)
 			isFavorite, _ := strconv.Atoi(row[9].Value)
 
-			_, err = localDB.Exec(
+			_, uErr := localDB.Exec(
 				`UPDATE bookmarks SET url=?, title=?, description=?, note=?, ai_note=?,
 				                      site_name=?, tags_text=?, click_count=?, is_favorite=?,
 				                      source=?, updated_at=?, deleted_at=?
@@ -96,21 +104,26 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 				row[1].Value, row[2].Value, row[3].Value, row[4].Value, row[5].Value,
 				row[6].Value, row[7].Value, clickCount, isFavorite,
 				row[10].Value, updatedAt, nullableText(row[13]), id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ pull update failed [%s]: %v\n", id[:8], err)
+			if uErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ pull update failed [%s]: %v\n", id[:8], uErr)
+				hasItemError = true
 			} else {
 				updCount++
 			}
 		}
 	}
+
+	if hasItemError {
+		err = fmt.Errorf("some bookmarks failed during pull")
+	}
 	return
 }
 
-// pullTags 拉取远端全量 tags，INSERT OR IGNORE（按 name 去重）。
-func pullTags(ctx context.Context, localDB *sql.DB, client *Client) {
+// pullTags 拉取远端全量 tags，INSERT OR IGNORE。
+func pullTags(ctx context.Context, localDB *sql.DB, client *Client) error {
 	res, err := client.ExecuteOne(ctx, `SELECT id, name FROM tags`)
 	if err != nil {
-		return
+		return err // API 级错误
 	}
 	for _, row := range res.Rows {
 		if len(row) < 2 {
@@ -119,11 +132,11 @@ func pullTags(ctx context.Context, localDB *sql.DB, client *Client) {
 		localDB.Exec(`INSERT OR IGNORE INTO tags (id, name) VALUES (?, ?)`,
 			row[0].Value, row[1].Value)
 	}
+	return nil
 }
 
 // pullBookmarkTags 拉取远端 bookmark_tags 变更并合并到本地。
-// 冲突策略：remote.updated_at > local.updated_at 时覆盖。
-func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) {
+func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) error {
 	q := `SELECT bookmark_id, tag_id, updated_at, deleted_at FROM bookmark_tags`
 	var args []Arg
 	if lastSynced != "" {
@@ -133,7 +146,7 @@ func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, last
 
 	res, err := client.ExecuteOne(ctx, q, args...)
 	if err != nil {
-		return
+		return err // API 级错误
 	}
 
 	for _, row := range res.Rows {
@@ -146,20 +159,21 @@ func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, last
 		deletedAt := nullableText(row[3])
 
 		var localUpdatedAt string
-		err := localDB.QueryRow(
+		qErr := localDB.QueryRow(
 			`SELECT updated_at FROM bookmark_tags WHERE bookmark_id = ? AND tag_id = ?`,
 			bmID, tagID).Scan(&localUpdatedAt)
 
-		if err == sql.ErrNoRows {
+		if qErr == sql.ErrNoRows {
 			localDB.Exec(
 				`INSERT INTO bookmark_tags (bookmark_id, tag_id, updated_at, deleted_at) VALUES (?, ?, ?, ?)`,
 				bmID, tagID, updatedAt, deletedAt)
-		} else if err == nil && updatedAt > localUpdatedAt {
+		} else if qErr == nil && updatedAt > localUpdatedAt {
 			localDB.Exec(
 				`UPDATE bookmark_tags SET updated_at = ?, deleted_at = ? WHERE bookmark_id = ? AND tag_id = ?`,
 				updatedAt, deletedAt, bmID, tagID)
 		}
 	}
+	return nil
 }
 
 // nullableText 将 Hrana Value 转为 Go 的 nullable 值。

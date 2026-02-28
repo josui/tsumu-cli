@@ -7,19 +7,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/josui/tsumu-cli/internal/sync"
 	"github.com/josui/tsumu-cli/internal/ui"
 )
 
 // syncStatusText 返回 TUI header 用的 sync 状态文本。
 func syncStatusText() string {
-	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
+	if !Cfg.Sync.CanSync() {
 		return ""
 	}
 	if Cfg.Sync.LastSynced == "" {
 		return "not synced"
 	}
-	var pending int
-	Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ?", Cfg.Sync.LastSynced).Scan(&pending)
+	pending := sync.PendingCount(Store.DB, Cfg.Sync.LastSynced)
 	if pending > 0 {
 		return fmt.Sprintf("%d pending", pending)
 	}

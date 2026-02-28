@@ -76,6 +76,12 @@ func (s *SyncConfig) IsEnabled() bool {
 	return s.Enabled
 }
 
+// CanSync 判断是否可以执行同步。
+// 需要三个条件全部满足：启用 + URL 已配置 + Token 已配置。
+func (s *SyncConfig) CanSync() bool {
+	return s.IsEnabled() && s.GetURL() != "" && s.GetAuthToken() != ""
+}
+
 // ParseInterval 将 interval 字符串（例如 "24h", "7d"）解析为 time.Duration。
 // 空字符串或无法解析时返回默认值 24h。
 func (s *SyncConfig) ParseInterval() time.Duration {

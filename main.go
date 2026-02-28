@@ -70,11 +70,15 @@ func main() {
 
 	// 2.5 Lazy sync：启用同步且距上次同步超过 interval 时，自动拉取/推送变更。
 	// 静默执行，失败不阻塞正常使用（仅输出警告）。
-	if cfg.Sync.IsEnabled() && cfg.Sync.NeedsSync() {
+	if cfg.Sync.CanSync() && cfg.Sync.NeedsSync() {
 		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
-		result := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, false, nil)
-		cfg.Sync.LastSynced = sync.NowUTC()
-		cfg.Save()
+		result, err := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, sync.SyncIncremental, nil)
+		if err == nil {
+			cfg.Sync.LastSynced = sync.NowUTC()
+			cfg.Save()
+		} else {
+			fmt.Fprintf(os.Stderr, "  ⚠ Auto-sync failed: %v\n", err)
+		}
 
 		pulled := result.PulledNew + result.PulledUpdated
 		pushed := result.PushedNew + result.PushedUpdated
