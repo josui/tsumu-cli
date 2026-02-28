@@ -73,6 +73,15 @@ func RunConfigAI() error {
 		Cfg.AI.GenModel = model
 	}
 
+	// Language for AI notes
+	fmt.Println("  AI note language: \"en\", \"zh,en\", \"zh,en,ja\" etc.")
+	fmt.Printf("  [%s]: ", Cfg.AI.GetLang())
+	lang, _ := reader.ReadString('\n')
+	lang = strings.TrimSpace(lang)
+	if lang != "" {
+		Cfg.AI.Lang = lang
+	}
+
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
