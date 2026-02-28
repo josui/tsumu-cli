@@ -108,6 +108,7 @@ type Model struct {
 	syncStatus string // sync 状态文本（header 显示用）
 	lastSynced string // 上次 sync 时间（用于动态刷新 syncStatus）
 	width      int    // 终端宽度
+	height     int    // 终端高度
 
 	// Tag autocomplete
 	allTags     []string // all existing tags (loaded on modeTag entry)
@@ -118,10 +119,11 @@ type Model struct {
 	aiExpanding bool // 是否正在 AI 展开中
 
 	// Overlay 状态
-	overlay     overlayType // 当前显示的 overlay
-	cmdFilter   string      // 命令面板搜索框输入
-	cmdFiltered []int       // 过滤后的 commands 索引
-	cmdCursor   int         // 命令面板中的光标位置
+	overlay         overlayType // 当前显示的 overlay
+	cmdFilter       string      // 命令面板搜索框输入
+	cmdFiltered     []int       // 过滤后的 commands 索引
+	cmdCursor       int         // 命令面板中的光标位置
+	cmdScrollOffset int         // 命令列表的滚动偏移（第一个可见条目的索引）
 
 	// Add 表单
 	addFields     [3]string // 0=URL, 1=Tags, 2=Note
@@ -155,6 +157,7 @@ func NewModel(database *sql.DB, cfg *config.Config, query string, favOnly bool, 
 		lastSynced: lastSynced,
 		mode:       modeNormal,
 		width:      80, // 默认值，WindowSizeMsg 到达后会更新
+		height:     24, // 默认值，WindowSizeMsg 到达后会更新
 	}
 }
 
@@ -408,6 +411,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 
 	case searchResultMsg:
@@ -725,6 +729,7 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		m.cmdScrollOffset = 0
 		return m, m.resetBlink()
 
 	// AI query expansion：query 非空且 AI 已配置时触发
@@ -946,6 +951,27 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleCommandKey 处理命令面板中的按键
 // 统一搜索/命令栏：Enter=搜索书签，Tab=执行命令，↑/↓/j/k=移动光标
+// cmdMaxVisible 计算命令列表区域最大可见行数
+// 窗口高度的 50% 减去固定行数（标题 2 行 + 搜索框 2 行 + 底部提示 2 行 + 边框 2 行 = 8 行）
+func (m Model) cmdMaxVisible() int {
+	max := m.height/2 - 8
+	if max < 3 {
+		max = 3
+	}
+	return max
+}
+
+// cmdEnsureVisible 确保 cmdCursor 在可见范围内，自动调整 cmdScrollOffset
+func (m *Model) cmdEnsureVisible() {
+	maxVisible := m.cmdMaxVisible()
+	if m.cmdCursor < m.cmdScrollOffset {
+		m.cmdScrollOffset = m.cmdCursor
+	}
+	if m.cmdCursor >= m.cmdScrollOffset+maxVisible {
+		m.cmdScrollOffset = m.cmdCursor - maxVisible + 1
+	}
+}
+
 func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEscape:
@@ -955,6 +981,7 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputPos = 0
 			m.cmdFiltered = fuzzyMatch("", commands)
 			m.cmdCursor = 0
+			m.cmdScrollOffset = 0
 			return m, m.resetBlink()
 		}
 		m.overlay = overlayNone
@@ -983,12 +1010,14 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyUp:
 		if m.cmdCursor > 0 {
 			m.cmdCursor--
+			m.cmdEnsureVisible()
 		}
 		return m, nil
 
 	case tea.KeyDown:
 		if m.cmdCursor < len(m.cmdFiltered)-1 {
 			m.cmdCursor++
+			m.cmdEnsureVisible()
 		}
 		return m, nil
 
@@ -999,12 +1028,14 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if ch == "j" {
 				if m.cmdCursor < len(m.cmdFiltered)-1 {
 					m.cmdCursor++
+					m.cmdEnsureVisible()
 				}
 				return m, nil
 			}
 			if ch == "k" {
 				if m.cmdCursor > 0 {
 					m.cmdCursor--
+					m.cmdEnsureVisible()
 				}
 				return m, nil
 			}
@@ -1017,6 +1048,7 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m2.input = ""
 		m2.cmdFiltered = fuzzyMatch(m2.cmdFilter, commands)
 		m2.cmdCursor = 0
+		m2.cmdScrollOffset = 0
 		return m2, cmd
 	}
 }
@@ -1058,6 +1090,7 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		m.cmdScrollOffset = 0
 		return m, m.resetBlink()
 
 	case tea.KeyTab:
@@ -1101,6 +1134,7 @@ func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		m.cmdScrollOffset = 0
 		return m, m.resetBlink()
 
 	case tea.KeyTab:
@@ -1150,6 +1184,7 @@ func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		m.cmdScrollOffset = 0
 		return m, m.resetBlink()
 
 	case tea.KeyTab:
@@ -1218,6 +1253,7 @@ func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		m.cmdScrollOffset = 0
 		return m, m.resetBlink()
 	} else if msg.String() == "q" {
 		m.overlay = overlayNone
@@ -1768,26 +1804,18 @@ func (m Model) View() string {
 
 	// 输入行（tags / note）
 	if m.mode == modeTag || m.mode == modeNote {
-		runes := []rune(m.input)
-		before := string(runes[:m.inputPos])
-		after := ""
-		// 光标位置的字符用反色渲染，末尾时显示空格
-		cursorChar := " "
-		if m.inputPos < len(runes) {
-			cursorChar = string(runes[m.inputPos])
-			after = string(runes[m.inputPos+1:])
-		}
-		var cursor string
-		if m.cursorVisible {
-			cursor = inputCursorStyle.Render(cursorChar)
-		} else {
-			cursor = cursorChar
-		}
 		label := "tags"
 		if m.mode == modeNote {
 			label = "note"
 		}
-		b.WriteString(fmt.Sprintf("  %s> %s%s%s\n", label, before, cursor, after))
+		prefix := fmt.Sprintf("  %s> ", label)
+		// 输入部分的可用宽度 = 终端宽度 - prefix 宽度
+		inputMaxW := m.width - stringWidth(prefix)
+		if inputMaxW < 10 {
+			inputMaxW = 10
+		}
+		inputContent := m.renderFieldWithCursor(m.input, inputMaxW)
+		b.WriteString(prefix + inputContent + "\n")
 
 		// Render suggestion dropdown (only in tag mode)
 		// Align suggestion text with the current token start position
@@ -1871,12 +1899,13 @@ func (m Model) renderAddForm() string {
 
 		var content string
 		if i == m.addFocus && !m.addSubmitting {
-			// 聚焦字段：显示光标
-			content = m.renderFieldWithCursor(m.addFields[i])
+			// 聚焦字段：显示光标（带视口滚动）
+			content = m.renderFieldWithCursor(m.addFields[i], fieldW)
 		} else if m.addFields[i] == "" && placeholders[i] != "" && !m.addSubmitting {
 			content = overlayHintStyle.Render(placeholders[i])
 		} else {
-			content = m.addFields[i]
+			// 非聚焦字段：左对齐截断
+			content = truncateField(m.addFields[i], fieldW)
 		}
 
 		fieldStyle := overlayFieldStyle
@@ -1979,12 +2008,13 @@ func (m Model) renderConfigAI() string {
 
 		var content string
 		if i == m.aiConfigFocus {
-			// 聚焦字段：显示光标
-			content = m.renderFieldWithCursor(m.aiConfigFields[i])
+			// 聚焦字段：显示光标（带视口滚动）
+			content = m.renderFieldWithCursor(m.aiConfigFields[i], fieldW)
 		} else if m.aiConfigFields[i] == "" && placeholders[i] != "" {
 			content = overlayHintStyle.Render(placeholders[i])
 		} else {
-			content = m.aiConfigFields[i]
+			// 非聚焦字段：左对齐截断
+			content = truncateField(m.aiConfigFields[i], fieldW)
 		}
 
 		fieldStyle := overlayFieldStyle
@@ -2044,12 +2074,15 @@ func (m Model) renderConfigSync() string {
 				content = overlayHintStyle.Render("○ Disabled")
 			}
 		} else if i == m.syncConfigFocus {
-			// 聚焦字段：显示光标
-			content = m.renderFieldWithCursor(m.syncConfigFields[i])
+			// 聚焦字段：显示光标（带视口滚动）
+			content = m.renderFieldWithCursor(m.syncConfigFields[i], fieldW)
 		} else {
 			content = m.syncConfigFields[i]
 			if content == "" && placeholders[i] != "" {
 				content = overlayHintStyle.Render(placeholders[i])
+			} else {
+				// 非聚焦字段：左对齐截断
+				content = truncateField(content, fieldW)
 			}
 		}
 
@@ -2095,36 +2128,62 @@ func (m Model) renderCommandPalette() string {
 		}
 		searchContent = cursor + overlayHintStyle.Render("Search or type command...")
 	} else {
-		searchContent = m.renderFieldWithCursor(m.cmdFilter)
+		searchContent = m.renderFieldWithCursor(m.cmdFilter, w)
 	}
 	b.WriteString(searchContent + "\n\n")
 
-	// 命令列表（按分类分组）
+	// 命令列表（按分类分组，支持滚动）
+	maxVisible := m.cmdMaxVisible()
+	totalItems := len(m.cmdFiltered)
+
+	// 顶部截断提示
+	if m.cmdScrollOffset > 0 {
+		b.WriteString(overlayHintStyle.Render("  ↑ more") + "\n")
+	}
+
+	// 构建可见区域内的行（需要考虑分类标题也占行数）
+	// 先计算每个条目的 displayIdx，再只渲染可见范围内的
 	lastCategory := ""
 	displayIdx := 0
+	visibleStart := m.cmdScrollOffset
+	visibleEnd := m.cmdScrollOffset + maxVisible
+	if visibleEnd > totalItems {
+		visibleEnd = totalItems
+	}
+
 	for _, idx := range m.cmdFiltered {
 		cmd := commands[idx]
-		if cmd.category != lastCategory {
-			if lastCategory != "" {
-				b.WriteString("\n")
+
+		if displayIdx >= visibleStart && displayIdx < visibleEnd {
+			// 分类标题：只在可见范围内且分类变化时显示
+			if cmd.category != lastCategory {
+				if lastCategory != "" {
+					b.WriteString("\n")
+				}
+				b.WriteString(overlayCatStyle.Render(cmd.category) + "\n")
 			}
-			b.WriteString(overlayCatStyle.Render(cmd.category) + "\n")
-			lastCategory = cmd.category
+
+			prefix := "  "
+			nameStyle := overlayCmdStyle
+			if displayIdx == m.cmdCursor {
+				prefix = "→ "
+				nameStyle = overlayCmdSelStyle
+			}
+			// name 固定 14 列宽，desc 跟在后面
+			namePad := 14 - stringWidth(cmd.name)
+			if namePad < 2 {
+				namePad = 2
+			}
+			b.WriteString(prefix + nameStyle.Render(cmd.name) + strings.Repeat(" ", namePad) + overlayHintStyle.Render(cmd.desc) + "\n")
 		}
 
-		prefix := "  "
-		nameStyle := overlayCmdStyle
-		if displayIdx == m.cmdCursor {
-			prefix = "→ "
-			nameStyle = overlayCmdSelStyle
-		}
-		// name 固定 14 列宽，desc 跟在后面
-		namePad := 14 - stringWidth(cmd.name)
-		if namePad < 2 {
-			namePad = 2
-		}
-		b.WriteString(prefix + nameStyle.Render(cmd.name) + strings.Repeat(" ", namePad) + overlayHintStyle.Render(cmd.desc) + "\n")
+		lastCategory = cmd.category
 		displayIdx++
+	}
+
+	// 底部截断提示
+	if visibleEnd < totalItems {
+		b.WriteString(overlayHintStyle.Render("  ↓ more") + "\n")
 	}
 
 	// 底部提示
@@ -2247,9 +2306,11 @@ func truncate(s string, maxWidth int) string {
 	return runewidth.Truncate(s, maxWidth, "..")
 }
 
-// renderFieldWithCursor 渲染带光标的输入字段内容。
+// renderFieldWithCursor 渲染带光标的输入字段内容（带视口滚动）。
+// maxWidth 为字段可见宽度（display columns）。当文字超长时，
+// 只显示光标附近的文字，模拟 web input 的水平滚动效果。
 // 光标处字符用反色样式，末尾时显示反色空格。闪烁周期由 cursorVisible 控制。
-func (m Model) renderFieldWithCursor(value string) string {
+func (m Model) renderFieldWithCursor(value string, maxWidth int) string {
 	runes := []rune(value)
 	pos := m.inputPos
 	// 防御：clamp 到合法范围
@@ -2259,13 +2320,54 @@ func (m Model) renderFieldWithCursor(value string) string {
 	if pos > len(runes) {
 		pos = len(runes)
 	}
-	before := string(runes[:pos])
+
+	// 光标处字符（末尾时为空格）
 	cursorChar := " "
-	after := ""
+	cursorW := 1
 	if pos < len(runes) {
 		cursorChar = string(runes[pos])
-		after = string(runes[pos+1:])
+		cursorW = runewidth.StringWidth(cursorChar)
 	}
+
+	// 计算视口：确保光标字符完整可见
+	// 策略：从光标处往左尽量填满 maxWidth
+	// beforeW = 光标左侧可显示的最大宽度
+	beforeW := maxWidth - cursorW
+	if beforeW < 0 {
+		beforeW = 0
+	}
+
+	// 从 pos 往左扫描，找到视口起始 rune 索引
+	viewStart := pos
+	usedW := 0
+	for viewStart > 0 {
+		cw := runewidth.RuneWidth(runes[viewStart-1])
+		if usedW+cw > beforeW {
+			break
+		}
+		usedW += cw
+		viewStart--
+	}
+
+	// 从 pos+1 往右扫描，填满剩余宽度
+	afterBudget := maxWidth - usedW - cursorW
+	viewEnd := pos + 1
+	for viewEnd < len(runes) && afterBudget > 0 {
+		cw := runewidth.RuneWidth(runes[viewEnd])
+		if cw > afterBudget {
+			break
+		}
+		afterBudget -= cw
+		viewEnd++
+	}
+
+	// 构建可见部分
+	before := string(runes[viewStart:pos])
+	after := ""
+	if pos+1 < viewEnd {
+		after = string(runes[pos+1 : viewEnd])
+	}
+
 	var cursor string
 	if m.cursorVisible {
 		cursor = inputCursorStyle.Render(cursorChar)
@@ -2273,6 +2375,15 @@ func (m Model) renderFieldWithCursor(value string) string {
 		cursor = cursorChar
 	}
 	return before + cursor + after
+}
+
+// truncateField 截断非聚焦字段的文字（左对齐，右侧截断）。
+// 与 truncate() 不同，不加 ".." 后缀，保持 input 的简洁外观。
+func truncateField(s string, maxWidth int) string {
+	if runewidth.StringWidth(s) <= maxWidth {
+		return s
+	}
+	return runewidth.Truncate(s, maxWidth, "")
 }
 
 // fuzzyMatch 简单的子串匹配（name 和 desc 都参与）
