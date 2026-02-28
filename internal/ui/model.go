@@ -130,6 +130,14 @@ type Model struct {
 
 	// 后台任务
 	bgTaskLabel string // header 右侧显示的任务进度文本（空 = 无任务）
+
+	// Config AI 表单
+	aiConfigFields [4]string // 0=Provider, 1=API Key, 2=Gen Model, 3=Lang
+	aiConfigFocus  int       // 当前聚焦的字段 (0-3)
+
+	// Config Sync 表单
+	syncConfigFields [4]string // 0=URL, 1=Auth Token, 2=Interval, 3=Enabled
+	syncConfigFocus  int       // 当前聚焦的字段 (0-3)
 }
 
 // NewModel 创建并初始化 Model。
@@ -155,6 +163,24 @@ func (m Model) contentWidth() int {
 	w := m.width - 2
 	if w < 40 {
 		w = 40
+	}
+	return w
+}
+
+// overlayWidth 返回 overlay 的内容宽度（总宽度的 70%，最小 44，最大 80，再减去边框+padding 的 6 字符）
+// 用法：各 render 函数中 w := m.overlayWidth()，最终 overlayBorderStyle.Width(w).Render(...)
+func (m Model) overlayWidth() int {
+	total := m.width * 70 / 100
+	if total < 44 {
+		total = 44
+	}
+	if total > 80 {
+		total = 80
+	}
+	// 减去 overlayBorderStyle 的水平装饰：Border(2) + Padding(1,2) 即 2+4=6
+	w := total - 6
+	if w < 38 {
+		w = 38
 	}
 	return w
 }
@@ -250,6 +276,13 @@ type syncDoneMsg struct {
 	result  sync.Result
 	warning string
 	err     error
+}
+
+// aiBatchDoneMsg 是批量 AI 增强完成后的消息
+type aiBatchDoneMsg struct {
+	total    int // 处理目标总数
+	enhanced int // 成功增强数
+	err      error
 }
 
 func (m Model) doAIExpand() tea.Cmd {
@@ -511,6 +544,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isError = false
 		m.lastSynced = m.cfg.Sync.LastSynced
 		refreshSyncStatus(&m)
+		return m, m.doSearch()
+
+	case aiBatchDoneMsg:
+		m.bgTaskLabel = ""
+		if msg.err != nil {
+			m.message = fmt.Sprintf("⚠ AI batch failed: %v", msg.err)
+			m.isError = true
+			return m, nil
+		}
+		if msg.total == 0 {
+			m.message = "✓ No bookmarks to enhance"
+		} else {
+			m.message = fmt.Sprintf("✓ AI enhanced %d/%d bookmarks", msg.enhanced, msg.total)
+		}
+		m.isError = false
 		return m, m.doSearch()
 
 	case cursorBlinkMsg:
@@ -927,9 +975,24 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.cmdFilter += string(msg.Runes)
-			m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
-			m.cmdCursor = 0
+			ch := string(msg.Runes)
+			// j/k 等同于 ↑/↓，与主列表体验统一
+			switch ch {
+			case "j":
+				if m.cmdCursor < len(m.cmdFiltered)-1 {
+					m.cmdCursor++
+				}
+				return m, nil
+			case "k":
+				if m.cmdCursor > 0 {
+					m.cmdCursor--
+				}
+				return m, nil
+			default:
+				m.cmdFilter += ch
+				m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
+				m.cmdCursor = 0
+			}
 		}
 		return m, nil
 	}
@@ -966,7 +1029,11 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyEscape:
-		m.overlay = overlayNone
+		// 回到命令面板而不是直接关闭 overlay
+		m.overlay = overlayCommand
+		m.cmdFilter = ""
+		m.cmdFiltered = fuzzyMatch("", commands)
+		m.cmdCursor = 0
 		return m, nil
 
 	case tea.KeyTab:
@@ -1008,13 +1075,146 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// 占位函数（后续 Task 实现）
-func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)   { return m, nil }
-func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { return m, nil }
+// handleConfigAIKey 处理 AI 配置表单的按键
+func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEscape:
+		// 回到命令面板
+		m.overlay = overlayCommand
+		m.cmdFilter = ""
+		m.cmdFiltered = fuzzyMatch("", commands)
+		m.cmdCursor = 0
+		return m, nil
 
-// handleSyncStatusKey 处理 Sync Status 卡片的按键（esc/q 关闭）
+	case tea.KeyTab:
+		m.aiConfigFocus = (m.aiConfigFocus + 1) % 4
+		return m, nil
+
+	case tea.KeyShiftTab:
+		m.aiConfigFocus = (m.aiConfigFocus + 3) % 4
+		return m, nil
+
+	case tea.KeyEnter:
+		// 保存 AI 配置
+		m.cfg.AI.Provider = strings.TrimSpace(m.aiConfigFields[0])
+		m.cfg.AI.APIKey = strings.TrimSpace(m.aiConfigFields[1])
+		m.cfg.AI.GenModel = strings.TrimSpace(m.aiConfigFields[2])
+		m.cfg.AI.Lang = strings.TrimSpace(m.aiConfigFields[3])
+		if err := m.cfg.Save(); err != nil {
+			m.message = fmt.Sprintf("Save failed: %v", err)
+			m.isError = true
+		} else {
+			m.message = "✓ AI config saved"
+			m.isError = false
+		}
+		m.overlay = overlayNone
+		return m, nil
+
+	case tea.KeyBackspace:
+		runes := []rune(m.aiConfigFields[m.aiConfigFocus])
+		if len(runes) > 0 {
+			m.aiConfigFields[m.aiConfigFocus] = string(runes[:len(runes)-1])
+		}
+		return m, nil
+
+	case tea.KeyCtrlU:
+		m.aiConfigFields[m.aiConfigFocus] = ""
+		return m, nil
+
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.aiConfigFields[m.aiConfigFocus] += string(msg.Runes)
+		} else if msg.Type == tea.KeySpace {
+			m.aiConfigFields[m.aiConfigFocus] += " "
+		}
+		return m, nil
+	}
+}
+
+// handleConfigSyncKey 处理 Sync 配置表单的按键
+func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEscape:
+		// 回到命令面板
+		m.overlay = overlayCommand
+		m.cmdFilter = ""
+		m.cmdFiltered = fuzzyMatch("", commands)
+		m.cmdCursor = 0
+		return m, nil
+
+	case tea.KeyTab:
+		m.syncConfigFocus = (m.syncConfigFocus + 1) % 4
+		return m, nil
+
+	case tea.KeyShiftTab:
+		m.syncConfigFocus = (m.syncConfigFocus + 3) % 4
+		return m, nil
+
+	case tea.KeyEnter:
+		// 保存 Sync 配置
+		m.cfg.Sync.URL = strings.TrimSpace(m.syncConfigFields[0])
+		m.cfg.Sync.AuthToken = strings.TrimSpace(m.syncConfigFields[1])
+		m.cfg.Sync.Interval = strings.TrimSpace(m.syncConfigFields[2])
+		m.cfg.Sync.Enabled = m.syncConfigFields[3] == "true"
+		if err := m.cfg.Save(); err != nil {
+			m.message = fmt.Sprintf("Save failed: %v", err)
+			m.isError = true
+		} else {
+			m.message = "✓ Sync config saved"
+			m.isError = false
+		}
+		m.overlay = overlayNone
+		refreshSyncStatus(&m)
+		return m, nil
+
+	case tea.KeyBackspace:
+		// Enabled 字段不支持退格
+		if m.syncConfigFocus == 3 {
+			return m, nil
+		}
+		runes := []rune(m.syncConfigFields[m.syncConfigFocus])
+		if len(runes) > 0 {
+			m.syncConfigFields[m.syncConfigFocus] = string(runes[:len(runes)-1])
+		}
+		return m, nil
+
+	case tea.KeyCtrlU:
+		if m.syncConfigFocus == 3 {
+			return m, nil
+		}
+		m.syncConfigFields[m.syncConfigFocus] = ""
+		return m, nil
+
+	default:
+		// Enabled 字段：space 切换 true/false
+		if m.syncConfigFocus == 3 {
+			if msg.Type == tea.KeySpace {
+				if m.syncConfigFields[3] == "true" {
+					m.syncConfigFields[3] = "false"
+				} else {
+					m.syncConfigFields[3] = "true"
+				}
+			}
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			m.syncConfigFields[m.syncConfigFocus] += string(msg.Runes)
+		} else if msg.Type == tea.KeySpace {
+			m.syncConfigFields[m.syncConfigFocus] += " "
+		}
+		return m, nil
+	}
+}
+
+// handleSyncStatusKey 处理 Sync Status 卡片的按键（esc 回命令面板，q 关闭）
 func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyEscape || msg.String() == "q" {
+	if msg.Type == tea.KeyEscape {
+		// 回到命令面板
+		m.overlay = overlayCommand
+		m.cmdFilter = ""
+		m.cmdFiltered = fuzzyMatch("", commands)
+		m.cmdCursor = 0
+	} else if msg.String() == "q" {
 		m.overlay = overlayNone
 	}
 	return m, nil
@@ -1046,10 +1246,46 @@ func (m Model) openSyncStatus() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// 占位函数（后续 Task 实现）
-func (m Model) startAIBatch(emptyOnly bool) (tea.Model, tea.Cmd) { return m, nil }
-func (m Model) openConfigAI() (tea.Model, tea.Cmd)               { return m, nil }
-func (m Model) openConfigSync() (tea.Model, tea.Cmd)             { return m, nil }
+// startAIBatch 启动批量 AI 增强（后台执行）
+func (m Model) startAIBatch(emptyOnly bool) (tea.Model, tea.Cmd) {
+	if !m.cfg.AI.IsConfigured() {
+		m.message = "AI not configured. Use /config ai"
+		m.isError = true
+		return m, nil
+	}
+	label := "✦ AI enhancing all..."
+	if emptyOnly {
+		label = "✦ AI enhancing empty..."
+	}
+	m.bgTaskLabel = label
+	return m, m.doAIBatch(emptyOnly)
+}
+
+// openConfigAI 打开 AI 配置表单，预填充当前配置
+func (m Model) openConfigAI() (tea.Model, tea.Cmd) {
+	m.overlay = overlayConfigAI
+	m.aiConfigFields = [4]string{
+		m.cfg.AI.GetProvider(),
+		m.cfg.AI.APIKey, // 显示 config 中的值（非 env），让用户知道实际配置
+		m.cfg.AI.GenModel,
+		m.cfg.AI.GetLang(),
+	}
+	m.aiConfigFocus = 0
+	return m, nil
+}
+
+// openConfigSync 打开 Sync 配置表单，预填充当前配置
+func (m Model) openConfigSync() (tea.Model, tea.Cmd) {
+	m.overlay = overlayConfigSync
+	m.syncConfigFields = [4]string{
+		m.cfg.Sync.URL,
+		m.cfg.Sync.AuthToken,
+		m.cfg.Sync.Interval,
+		fmt.Sprintf("%t", m.cfg.Sync.Enabled),
+	}
+	m.syncConfigFocus = 0
+	return m, nil
+}
 
 // ============================================================
 // 异步命令（tea.Cmd）
@@ -1385,6 +1621,45 @@ func (m Model) doBackgroundAIEnhance(bookmarkID string) tea.Cmd {
 	}
 }
 
+// doAIBatch 异步批量 AI 增强书签
+func (m Model) doAIBatch(emptyOnly bool) tea.Cmd {
+	database := m.db
+	cfg := m.cfg
+	return func() tea.Msg {
+		bookmarks, err := db.ListBookmarksForAI(database, emptyOnly)
+		if err != nil {
+			return aiBatchDoneMsg{err: err}
+		}
+		if len(bookmarks) == 0 {
+			return aiBatchDoneMsg{total: 0, enhanced: 0}
+		}
+
+		allTags, _ := db.ListAllTags(database)
+		apiKey := cfg.AI.GetAPIKey()
+		genModel := cfg.AI.GetGenModel()
+		lang := cfg.AI.GetLang()
+		client := ai.NewClient(apiKey, genModel)
+
+		enhanced := 0
+		for _, bm := range bookmarks {
+			result, err := client.EnhanceBookmark(context.Background(), bm.Title, bm.URL, bm.SiteName, allTags, lang)
+			if err != nil {
+				continue
+			}
+			if result.Description != "" {
+				note := ai.FormatAiNote(result.Description, result.Keywords)
+				_ = db.UpdateAiNote(database, bm.ID, note)
+			}
+			if len(result.Tags) > 0 {
+				_ = db.AddTagsToBookmark(database, bm.ID, result.Tags)
+			}
+			enhanced++
+		}
+
+		return aiBatchDoneMsg{total: len(bookmarks), enhanced: enhanced}
+	}
+}
+
 // doSync 异步执行同步操作
 func (m Model) doSync(force bool) tea.Cmd {
 	database := m.db
@@ -1531,7 +1806,7 @@ func (m Model) View() string {
 
 	base := b.String()
 
-	// overlay 渲染：叠加在列表内容之上
+	// overlay 渲染：居中叠加在列表内容之上
 	if m.overlay != overlayNone {
 		overlay := m.renderOverlay()
 		if overlay != "" {
@@ -1540,7 +1815,6 @@ func (m Model) View() string {
 				lipgloss.Center, lipgloss.Center,
 				overlay,
 				lipgloss.WithWhitespaceChars(" "),
-				lipgloss.WithWhitespaceForeground(lipgloss.Color("#333333")),
 			)
 		}
 	}
@@ -1568,12 +1842,12 @@ func (m Model) renderOverlay() string {
 // renderAddForm 渲染 Add Bookmark 表单
 func (m Model) renderAddForm() string {
 	var b strings.Builder
-	w := 44
+	w := m.overlayWidth()
 
-	// 标题
+	// 标题行（手动 pad 到 w 宽度）
 	title := overlayTitleStyle.Render("Add Bookmark")
 	hint := overlayHintStyle.Render("esc")
-	gap := w - stringWidth(title) - stringWidth(hint)
+	gap := w - lipgloss.Width(title) - lipgloss.Width(hint)
 	if gap < 2 {
 		gap = 2
 	}
@@ -1581,6 +1855,8 @@ func (m Model) renderAddForm() string {
 
 	labels := [3]string{"URL", "Tags (comma separated, optional)", "Note (optional)"}
 	placeholders := [3]string{"Paste URL here...", "", ""}
+	// field 内容宽度 = overlay 内容宽度 - field 自身 border(2) + padding(2)
+	fieldW := w - 4
 
 	for i := 0; i < 3; i++ {
 		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
@@ -1595,12 +1871,12 @@ func (m Model) renderAddForm() string {
 			fieldStyle = overlayFieldFocusStyle
 		}
 
-		// 固定宽度输入框
-		fieldContent := content
-		if stringWidth(fieldContent) < w-4 {
-			fieldContent += strings.Repeat(" ", w-4-stringWidth(fieldContent))
+		// 用 lipgloss.Width() 测量可见宽度（ANSI-safe），手动 pad 到 fieldW
+		visW := lipgloss.Width(content)
+		if visW < fieldW {
+			content += strings.Repeat(" ", fieldW-visW)
 		}
-		b.WriteString(fieldStyle.Render(fieldContent) + "\n")
+		b.WriteString(fieldStyle.Render(content) + "\n")
 
 		if i < 2 {
 			b.WriteString("\n")
@@ -1619,11 +1895,11 @@ func (m Model) renderAddForm() string {
 // renderSyncStatus 渲染 Sync 状态卡片
 func (m Model) renderSyncStatus() string {
 	var b strings.Builder
-	w := 44
+	w := m.overlayWidth()
 
 	title := overlayTitleStyle.Render("Sync Status")
 	hint := overlayHintStyle.Render("esc")
-	gap := w - stringWidth(title) - stringWidth(hint)
+	gap := w - lipgloss.Width(title) - lipgloss.Width(hint)
 	if gap < 2 {
 		gap = 2
 	}
@@ -1667,19 +1943,120 @@ func (m Model) renderSyncStatus() string {
 	return overlayBorderStyle.Render(b.String())
 }
 
-// 占位渲染函数（后续 Task 实现）
-func (m Model) renderConfigAI() string   { return "" }
-func (m Model) renderConfigSync() string { return "" }
+// renderConfigAI 渲染 AI 配置表单
+func (m Model) renderConfigAI() string {
+	var b strings.Builder
+	w := m.overlayWidth()
+
+	// 标题行
+	title := overlayTitleStyle.Render("Config AI")
+	hint := overlayHintStyle.Render("esc")
+	gap := w - lipgloss.Width(title) - lipgloss.Width(hint)
+	if gap < 2 {
+		gap = 2
+	}
+	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
+
+	labels := [4]string{"Provider", "API Key", "Gen Model", "Lang (e.g. en, zh,en)"}
+	placeholders := [4]string{"gemini", "", "gemini-flash-latest", "en"}
+	fieldW := w - 4
+
+	for i := 0; i < 4; i++ {
+		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
+
+		content := m.aiConfigFields[i]
+		if content == "" && placeholders[i] != "" {
+			content = overlayHintStyle.Render(placeholders[i])
+		}
+
+		fieldStyle := overlayFieldStyle
+		if i == m.aiConfigFocus {
+			fieldStyle = overlayFieldFocusStyle
+		}
+
+		visW := lipgloss.Width(content)
+		if visW < fieldW {
+			content += strings.Repeat(" ", fieldW-visW)
+		}
+		b.WriteString(fieldStyle.Render(content) + "\n")
+
+		if i < 3 {
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n" + overlayHintStyle.Render("tab next · shift+tab prev · enter save"))
+
+	return overlayBorderStyle.Render(b.String())
+}
+
+// renderConfigSync 渲染 Sync 配置表单
+func (m Model) renderConfigSync() string {
+	var b strings.Builder
+	w := m.overlayWidth()
+
+	// 标题行
+	title := overlayTitleStyle.Render("Config Sync")
+	hint := overlayHintStyle.Render("esc")
+	gap := w - lipgloss.Width(title) - lipgloss.Width(hint)
+	if gap < 2 {
+		gap = 2
+	}
+	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
+
+	labels := [4]string{"URL", "Auth Token", "Interval (e.g. 24h, 7d)", "Enabled"}
+	placeholders := [4]string{"libsql://your-db.turso.io", "", "24h", ""}
+	fieldW := w - 4
+
+	for i := 0; i < 4; i++ {
+		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
+
+		fieldStyle := overlayFieldStyle
+		if i == m.syncConfigFocus {
+			fieldStyle = overlayFieldFocusStyle
+		}
+
+		var content string
+		if i == 3 {
+			// Enabled 字段：toggle 显示
+			enabled := m.syncConfigFields[3] == "true"
+			if enabled {
+				content = messageStyle.Render("● Enabled")
+			} else {
+				content = overlayHintStyle.Render("○ Disabled")
+			}
+		} else {
+			content = m.syncConfigFields[i]
+			if content == "" && placeholders[i] != "" {
+				content = overlayHintStyle.Render(placeholders[i])
+			}
+		}
+
+		visW := lipgloss.Width(content)
+		if visW < fieldW {
+			content += strings.Repeat(" ", fieldW-visW)
+		}
+		b.WriteString(fieldStyle.Render(content) + "\n")
+
+		if i < 3 {
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n" + overlayHintStyle.Render("tab next · space toggle · enter save"))
+
+	return overlayBorderStyle.Render(b.String())
+}
 
 // renderCommandPalette 渲染命令面板：搜索框 + 分类命令列表
 func (m Model) renderCommandPalette() string {
 	var b strings.Builder
+	w := m.overlayWidth()
 
 	// 标题行
 	title := overlayTitleStyle.Render("Commands")
 	hint := overlayHintStyle.Render("esc")
-	titleWidth := 44 // overlay 内容固定宽度
-	gap := titleWidth - stringWidth(title) - stringWidth(hint)
+	gap := w - lipgloss.Width(title) - lipgloss.Width(hint)
 	if gap < 2 {
 		gap = 2
 	}
