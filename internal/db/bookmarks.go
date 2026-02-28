@@ -71,6 +71,38 @@ func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) 
 		return GetBookmarkByID(db, existingID)
 	}
 
+	// 检查是否有同 URL 的软删除记录，有的话恢复而非新建，避免 UNIQUE 约束冲突
+	var deletedID string
+	err = db.QueryRow(`SELECT id FROM bookmarks WHERE url = ? AND deleted_at IS NOT NULL`, url).Scan(&deletedID)
+	if err == nil {
+		// 恢复软删除记录：清除 deleted_at，更新 metadata，重置时间戳
+		if note != "" {
+			_, err = db.Exec(
+				`UPDATE bookmarks
+				 SET title = ?, description = ?, site_name = ?, note = ?,
+				     deleted_at = NULL,
+				     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+				     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				 WHERE id = ?`,
+				title, description, siteName, note, deletedID,
+			)
+		} else {
+			_, err = db.Exec(
+				`UPDATE bookmarks
+				 SET title = ?, description = ?, site_name = ?,
+				     note = '', deleted_at = NULL,
+				     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+				     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				 WHERE id = ?`,
+				title, description, siteName, deletedID,
+			)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("restore deleted bookmark failed: %w", err)
+		}
+		return GetBookmarkByID(db, deletedID)
+	}
+
 	// 新增
 	id := newULID()
 	_, err = db.Exec(
