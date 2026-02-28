@@ -112,7 +112,7 @@ func runAdd(rawURL string, note string, tags string) error {
 
 	// ── AI 增强（后台子进程，不阻塞 add 命令）──
 	if Cfg != nil && Cfg.AI.IsConfigured() {
-		fmt.Println("  ⠋ AI enhancing in background...")
+		fmt.Println("  ✦ AI will enhance this bookmark in the background.")
 		exe, err := os.Executable()
 		if err == nil {
 			proc := exec.Command(exe, "ai-enhance", "--id", bm.ID)
