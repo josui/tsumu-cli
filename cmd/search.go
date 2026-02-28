@@ -28,25 +28,10 @@ func syncStatusText() string {
 
 // runSearch 启动搜索 TUI。
 func runSearch(query string, favOnly bool, since string, tag string) error {
-	// 从 Cfg 提取 AI 配置
-	var aiKey, aiModel, aiLang string
-	if Cfg != nil && Cfg.AI.IsConfigured() {
-		aiKey = Cfg.AI.GetAPIKey()
-		aiModel = Cfg.AI.GetGenModel()
-		aiLang = Cfg.AI.GetLang()
-	}
-
-	// 创建 bubbletea Model
-	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText(), Cfg.Sync.LastSynced, aiKey, aiModel, aiLang)
-
-	// tea.NewProgram 创建 TUI 程序
-	// tea.WithAltScreen: 使用备用屏幕缓冲区（退出时恢复原终端内容）
+	model := ui.NewModel(Store.DB, Cfg, query, favOnly, since, tag, syncStatusText(), Cfg.Sync.LastSynced)
 	p := tea.NewProgram(model, tea.WithAltScreen())
-
-	// Run 启动事件循环，阻塞直到程序退出（用户按 q 或 Ctrl+C）
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI failed to start: %w", err)
 	}
-
 	return nil
 }

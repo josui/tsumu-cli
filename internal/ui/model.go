@@ -24,6 +24,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/josui/tsumu-cli/config"
 	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
 	"github.com/josui/tsumu-cli/internal/meta"
@@ -49,9 +50,10 @@ const (
 
 // Model 是 TUI 的完整状态。bubbletea 要求实现 Init/Update/View 三个方法。
 type Model struct {
-	db      *sql.DB       // 数据库连接
-	query   string        // 搜索关键词（空 = 列出全部）
-	results []db.Bookmark // 搜索结果
+	db      *sql.DB        // 数据库连接
+	cfg     *config.Config // 配置（AI、Sync、DomainTags 等）
+	query   string         // 搜索关键词（空 = 列出全部）
+	results []db.Bookmark  // 搜索结果
 	total    int           // 结果总数
 	pageSize int           // 每页条数
 
@@ -79,31 +81,24 @@ type Model struct {
 	selectedSug int      // selected suggestion index
 
 	// AI query expansion
-	aiAPIKey   string // Gemini API key（从 config 注入）
-	aiGenModel string // Gemini model name
-	aiLang     string // AI 生成语言配置（如 "zh,en"）
-	aiExpanding bool  // 是否正在 AI 展开中
+	aiExpanding bool // 是否正在 AI 展开中
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, lastSynced string, aiAPIKey string, aiGenModel string, aiLang string) Model {
-	if pageSize <= 0 {
-		pageSize = 5
-	}
+// cfg 注入完整配置，TUI 内可直接读取 AI/Sync/DomainTags 等设置。
+func NewModel(database *sql.DB, cfg *config.Config, query string, favOnly bool, since string, tag string, syncStatus string, lastSynced string) Model {
 	return Model{
 		db:         database,
+		cfg:        cfg,
 		query:      query,
 		favOnly:    favOnly,
 		since:      since,
 		tag:        tag,
-		pageSize:   pageSize,
+		pageSize:   cfg.GetPageSize(),
 		syncStatus: syncStatus,
 		lastSynced: lastSynced,
 		mode:       modeNormal,
 		width:      80, // 默认值，WindowSizeMsg 到达后会更新
-		aiAPIKey:   aiAPIKey,
-		aiGenModel: aiGenModel,
-		aiLang:     aiLang,
 	}
 }
 
@@ -190,8 +185,8 @@ type refetchResultMsg struct {
 
 func (m Model) doAIExpand() tea.Cmd {
 	query := m.query
-	apiKey := m.aiAPIKey
-	genModel := m.aiGenModel
+	apiKey := m.cfg.AI.GetAPIKey()
+	genModel := m.cfg.AI.GetGenModel()
 	return func() tea.Msg {
 		client := ai.NewClient(apiKey, genModel)
 		keywords, err := client.ExpandQuery(context.Background(), query)
@@ -543,7 +538,7 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 
 	// AI query expansion：query 非空且 AI 已配置时触发
 	case keyAIExpand:
-		if m.query != "" && m.aiAPIKey != "" && !m.aiExpanding {
+		if m.query != "" && m.cfg.AI.IsConfigured() && !m.aiExpanding {
 			m.aiExpanding = true
 			m.message = "AI expanding..."
 			m.isError = false
@@ -927,9 +922,9 @@ func (m Model) doRefetch() tea.Cmd {
 	id := bm.ID
 	url := bm.URL
 	database := m.db
-	apiKey := m.aiAPIKey
-	genModel := m.aiGenModel
-	lang := m.aiLang
+	apiKey := m.cfg.AI.GetAPIKey()
+	genModel := m.cfg.AI.GetGenModel()
+	lang := m.cfg.AI.GetLang()
 
 	return func() tea.Msg {
 		// 1. 重新抓取网页元数据
@@ -991,7 +986,7 @@ func (m Model) View() string {
 	} else {
 		header = fmt.Sprintf("tsumu %s", m.query)
 		// AI expand 提示紧跟搜索词，比放在 help 栏更醒目
-		if m.aiAPIKey != "" {
+		if m.cfg.AI.IsConfigured() {
 			header += "  [⇥ AI]"
 		}
 	}
