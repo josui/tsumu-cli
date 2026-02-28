@@ -278,7 +278,7 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# ============================================================\n\n")
 
 	// ── page_size ──
-	fmt.Fprintf(w, "# TUI 每页显示的书签数 / Number of bookmarks per page in TUI\n")
+	fmt.Fprintf(w, "# Number of bookmarks per page in TUI\n")
 	fmt.Fprintf(w, "# Default: 5\n")
 	if c.PageSize > 0 {
 		fmt.Fprintf(w, "page_size = %d\n", c.PageSize)
@@ -290,7 +290,6 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "\n# ============================================================\n")
 	fmt.Fprintf(w, "# Domain auto-tagging\n")
 	fmt.Fprintf(w, "# ============================================================\n")
-	fmt.Fprintf(w, "# 添加书签时，根据 URL 域名自动打标签\n")
 	fmt.Fprintf(w, "# Auto-tag bookmarks based on URL domain when adding.\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "# Format: \"domain\" = \"tag\"\n")
@@ -317,23 +316,23 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# ============================================================\n")
 	fmt.Fprintf(w, "# Setup: tsumu sync --setup\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# 也可用环境变量配置（推荐，避免 token 明文存储）:\n")
+	fmt.Fprintf(w, "# Environment variables (recommended, avoids plain-text tokens):\n")
 	fmt.Fprintf(w, "#   export TSUMU_SYNC_URL=\"libsql://your-db.turso.io\"\n")
 	fmt.Fprintf(w, "#   export TSUMU_SYNC_AUTH_TOKEN=\"your-token\"\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# 优先级: 环境变量 > config.toml\n")
+	fmt.Fprintf(w, "# Priority: env var > config.toml\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[sync]\n")
 	fmt.Fprintf(w, "enabled = %t\n", c.Sync.Enabled)
 	if c.Sync.URL != "" {
 		fmt.Fprintf(w, "url = %q\n", c.Sync.URL)
 	} else {
-		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"  # 推荐用 TSUMU_SYNC_URL 环境变量代替\n")
+		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"  # prefer TSUMU_SYNC_URL env var\n")
 	}
 	if c.Sync.AuthToken != "" {
 		fmt.Fprintf(w, "auth_token = %q\n", c.Sync.AuthToken)
 	} else {
-		fmt.Fprintf(w, "# auth_token = \"your-token\"  # 推荐用 TSUMU_SYNC_AUTH_TOKEN 环境变量代替\n")
+		fmt.Fprintf(w, "# auth_token = \"your-token\"  # prefer TSUMU_SYNC_AUTH_TOKEN env var\n")
 	}
 	if c.Sync.Interval != "" {
 		fmt.Fprintf(w, "interval = %q\n", c.Sync.Interval)
@@ -351,11 +350,11 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# Provider: \"gemini\"\n")
 	fmt.Fprintf(w, "# Setup: tsumu config --ai\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# 推荐使用环境变量配置 API key（避免明文存储在配置文件中）:\n")
+	fmt.Fprintf(w, "# Environment variables (recommended, avoids plain-text keys):\n")
 	fmt.Fprintf(w, "#   export TSUMU_AI_API_KEY=\"your-api-key\"\n")
-	fmt.Fprintf(w, "#   export TSUMU_AI_GEN_MODEL=\"gemini-flash-latest\"  # 可选，默认 gemini-flash-latest\n")
+	fmt.Fprintf(w, "#   export TSUMU_AI_GEN_MODEL=\"gemini-flash-latest\"  # optional, default gemini-flash-latest\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# 优先级: 环境变量 > config.toml\n")
+	fmt.Fprintf(w, "# Priority: env var > config.toml\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[ai]\n")
 	if c.AI.Provider != "" {
@@ -366,7 +365,7 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	if c.AI.APIKey != "" {
 		fmt.Fprintf(w, "api_key = %q\n", c.AI.APIKey)
 	} else {
-		fmt.Fprintf(w, "# api_key = \"your-api-key\"  # 推荐用 TSUMU_AI_API_KEY 环境变量代替\n")
+		fmt.Fprintf(w, "# api_key = \"your-api-key\"  # prefer TSUMU_AI_API_KEY env var\n")
 	}
 	if c.AI.GenModel != "" {
 		fmt.Fprintf(w, "gen_model = %q\n", c.AI.GenModel)
@@ -376,7 +375,7 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	if c.AI.Lang != "" {
 		fmt.Fprintf(w, "lang = %q\n", c.AI.Lang)
 	} else {
-		fmt.Fprintf(w, "# lang = \"en\"  # ai_note 语言: \"en\", \"zh,en\", \"zh,en,ja\" 等\n")
+		fmt.Fprintf(w, "# lang = \"en\"  # ai_note language: \"en\", \"zh,en\", \"zh,en,ja\" etc.\n")
 	}
 	if c.AI.Model != "" {
 		fmt.Fprintf(w, "model = %q\n", c.AI.Model)
