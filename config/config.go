@@ -123,8 +123,17 @@ type AIConfig struct {
 	Provider  string `toml:"provider"`             // "gemini" | "ollama"
 	APIKey    string `toml:"api_key"`               // gemini 需要 API key
 	GenModel  string `toml:"gen_model,omitempty"`    // text generation 模型，默认 "gemini-3-flash"
+	Lang      string `toml:"lang,omitempty"`         // ai_note 语言，逗号分隔（如 "zh,en"）。默认 "en"
 	Model     string `toml:"model,omitempty"`        // embedding 模型名（预留）
 	Dimension int    `toml:"dimension,omitempty"`    // embedding 维度（预留）
+}
+
+// GetLang 返回 AI 生成语言配置。默认 "en"。
+func (a *AIConfig) GetLang() string {
+	if a.Lang != "" {
+		return a.Lang
+	}
+	return "en"
 }
 
 // IsConfigured returns true if AI is set up.
@@ -363,6 +372,11 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 		fmt.Fprintf(w, "gen_model = %q\n", c.AI.GenModel)
 	} else {
 		fmt.Fprintf(w, "# gen_model = \"gemini-flash-latest\"\n")
+	}
+	if c.AI.Lang != "" {
+		fmt.Fprintf(w, "lang = %q\n", c.AI.Lang)
+	} else {
+		fmt.Fprintf(w, "# lang = \"en\"  # ai_note 语言: \"en\", \"zh,en\", \"zh,en,ja\" 等\n")
 	}
 	if c.AI.Model != "" {
 		fmt.Fprintf(w, "model = %q\n", c.AI.Model)
