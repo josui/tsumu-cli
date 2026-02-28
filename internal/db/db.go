@@ -210,28 +210,77 @@ CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks BEGIN
 END;
 `
 
-// migrationV3 为已有数据库添加 soft delete 支持。
-// bookmarks 表和 bookmark_tags 表新增 deleted_at 列用于 tombstone 标记。
-// bookmark_tags 新增 updated_at 列用于冲突解决。
-// FTS5 触发器更新为忽略已删除的记录。
-const migrationV3 = `
--- bookmarks: 添加 soft delete 列
-ALTER TABLE bookmarks ADD COLUMN deleted_at TEXT DEFAULT NULL;
+// migrationV3 的 SQL 已内联到 migrateV3() 函数中，以实现逐步检查和幂等执行。
 
--- bookmark_tags: 添加时间戳和 soft delete 列
--- SQLite ALTER TABLE ADD COLUMN 不支持非常量默认值，先用 NULL 再回填
-ALTER TABLE bookmark_tags ADD COLUMN updated_at TEXT DEFAULT NULL;
-ALTER TABLE bookmark_tags ADD COLUMN deleted_at TEXT DEFAULT NULL;
+// migrate 检查数据库并执行必要的 migration。
+// 使用表/列存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
+// migrationV1 的所有语句都用 IF NOT EXISTS，天然幂等。
+func migrate(db *sql.DB) error {
+	// 检查 bookmarks 表是否存在
+	var tableName string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'`).Scan(&tableName)
+	if err != nil {
+		// 表不存在，执行完整 v1 migration（已包含 ai_note）
+		if err := execStatements(db, migrationV1); err != nil {
+			return fmt.Errorf("migration v1 failed: %w", err)
+		}
+		return nil
+	}
 
--- 为已有 bookmark_tags 行填充 updated_at（用对应 bookmark 的 created_at）
-UPDATE bookmark_tags
-SET updated_at = COALESCE(
-    (SELECT created_at FROM bookmarks WHERE id = bookmark_tags.bookmark_id),
-    strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-)
-WHERE updated_at IS NULL;
+	// 表已存在，检查是否需要 v2 升级（ai_note 列）
+	if !columnExists(db, "bookmarks", "ai_note") {
+		if err := execStatements(db, migrationV2); err != nil {
+			return fmt.Errorf("migration v2 failed: %w", err)
+		}
+	}
 
--- 重建 FTS5 触发器：soft delete 时从 FTS 索引中移除
+	// V3: soft delete 支持（bookmarks.deleted_at, bookmark_tags.updated_at/deleted_at）
+	// 检查 bookmark_tags.deleted_at（V3 的最后一个 ALTER），确保部分完成的 V3 也能重跑。
+	// 各 ALTER TABLE 单独执行并忽略 "duplicate column" 错误，保证幂等性。
+	if !columnExists(db, "bookmark_tags", "deleted_at") {
+		if err := migrateV3(db); err != nil {
+			return fmt.Errorf("migration v3 failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// migrateV3 执行 V3 migration（soft delete 支持），每步单独检查列是否存在，保证幂等。
+// 解决部分完成场景：如 bookmarks.deleted_at 已添加但 bookmark_tags.deleted_at 未添加时，
+// 只跳过已完成的 ALTER，继续执行剩余步骤。
+func migrateV3(db *sql.DB) error {
+	// 逐个添加列，已存在则跳过
+	alters := []struct {
+		table, column string
+	}{
+		{"bookmarks", "deleted_at"},
+		{"bookmark_tags", "updated_at"},
+		{"bookmark_tags", "deleted_at"},
+	}
+	for _, a := range alters {
+		if !columnExists(db, a.table, a.column) {
+			stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT DEFAULT NULL", a.table, a.column)
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("add column %s.%s failed: %w", a.table, a.column, err)
+			}
+		}
+	}
+
+	// 回填 bookmark_tags.updated_at
+	_, err := db.Exec(`
+		UPDATE bookmark_tags
+		SET updated_at = COALESCE(
+			(SELECT created_at FROM bookmarks WHERE id = bookmark_tags.bookmark_id),
+			strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		)
+		WHERE updated_at IS NULL`)
+	if err != nil {
+		return fmt.Errorf("backfill bookmark_tags.updated_at failed: %w", err)
+	}
+
+	// 重建 FTS5 触发器：soft delete 感知
+	triggerSQL := `
 DROP TRIGGER IF EXISTS bookmarks_ai;
 DROP TRIGGER IF EXISTS bookmarks_ad;
 DROP TRIGGER IF EXISTS bookmarks_au;
@@ -257,34 +306,8 @@ CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks BEGIN
     WHERE new.deleted_at IS NULL;
 END;
 `
-
-// migrate 检查数据库并执行必要的 migration。
-// 使用表/列存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
-// migrationV1 的所有语句都用 IF NOT EXISTS，天然幂等。
-func migrate(db *sql.DB) error {
-	// 检查 bookmarks 表是否存在
-	var tableName string
-	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'`).Scan(&tableName)
-	if err != nil {
-		// 表不存在，执行完整 v1 migration（已包含 ai_note）
-		if err := execStatements(db, migrationV1); err != nil {
-			return fmt.Errorf("migration v1 failed: %w", err)
-		}
-		return nil
-	}
-
-	// 表已存在，检查是否需要 v2 升级（ai_note 列）
-	if !columnExists(db, "bookmarks", "ai_note") {
-		if err := execStatements(db, migrationV2); err != nil {
-			return fmt.Errorf("migration v2 failed: %w", err)
-		}
-	}
-
-	// V3: soft delete 支持（bookmarks.deleted_at, bookmark_tags.updated_at/deleted_at）
-	if !columnExists(db, "bookmarks", "deleted_at") {
-		if err := execStatements(db, migrationV3); err != nil {
-			return fmt.Errorf("migration v3 failed: %w", err)
-		}
+	if err := execStatements(db, triggerSQL); err != nil {
+		return fmt.Errorf("rebuild triggers failed: %w", err)
 	}
 
 	return nil

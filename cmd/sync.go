@@ -23,6 +23,7 @@ var (
 	syncSetup  bool
 	syncStatus bool
 	syncOff    bool
+	syncForce  bool
 )
 
 // syncCmd 是 tsumu sync 子命令。
@@ -32,6 +33,7 @@ var syncCmd = &cobra.Command{
 	Long: `Manage Turso cloud sync.
 
   tsumu sync              manual sync (pull latest changes)
+  tsumu sync --force      force full sync (ignore LWW, overwrite remote)
   tsumu sync --setup      configure Turso sync
   tsumu sync --status     show sync status
   tsumu sync --off        disable sync`,
@@ -46,7 +48,7 @@ var syncCmd = &cobra.Command{
 		if syncOff {
 			return runSyncOff()
 		}
-		// 无 flag：手动触发 sync
+		// 无 flag 或 --force：手动触发 sync
 		return runSyncManual()
 	},
 }
@@ -55,6 +57,7 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncSetup, "setup", false, "configure Turso sync")
 	syncCmd.Flags().BoolVar(&syncStatus, "status", false, "show sync status")
 	syncCmd.Flags().BoolVar(&syncOff, "off", false, "disable sync")
+	syncCmd.Flags().BoolVar(&syncForce, "force", false, "force full sync (overwrite remote)")
 }
 
 // runSyncManual 手动触发双向同步。
@@ -68,7 +71,13 @@ func runSyncManual() error {
 	client := sync.NewClient(Cfg.Sync.GetURL(), Cfg.Sync.GetAuthToken())
 	ctx := context.Background()
 
-	result := sync.SyncAll(ctx, Store.DB, client, Cfg.Sync.LastSynced, func(msg string) {
+	lastSynced := Cfg.Sync.LastSynced
+	if syncForce {
+		lastSynced = ""
+		fmt.Println("  Force sync: full push (overwrite remote)")
+	}
+
+	result := sync.SyncAll(ctx, Store.DB, client, lastSynced, syncForce, func(msg string) {
 		fmt.Printf("\r  ⠋ %s", msg)
 	})
 
@@ -84,6 +93,10 @@ func runSyncManual() error {
 		fmt.Printf("  ✓ Pushed: %d new, %d updated\n", result.PushedNew, result.PushedUpdated)
 	} else {
 		fmt.Println("  ✓ Already up to date")
+	}
+
+	if result.Warning != "" {
+		fmt.Printf("  ⚠ %s\n", result.Warning)
 	}
 
 	return nil
@@ -108,34 +121,62 @@ func runSyncSetup() error {
 	}
 
 	if url == "" {
+		// 检查环境变量是否已设置
+		envURL := os.Getenv("TSUMU_SYNC_URL")
+		envToken := os.Getenv("TSUMU_SYNC_AUTH_TOKEN")
+
+		if envURL != "" {
+			fmt.Printf("  ✓ TSUMU_SYNC_URL detected (%s)\n", envURL)
+		}
+		if envToken != "" {
+			fmt.Printf("  ✓ TSUMU_SYNC_AUTH_TOKEN detected (***%s)\n", envToken[max(0, len(envToken)-4):])
+		}
+		fmt.Println()
+		fmt.Println("  Leave blank to use environment variables.")
+		fmt.Println()
+
 		fmt.Print("  Turso database URL: ")
 		input, _ := reader.ReadString('\n')
 		url = strings.TrimSpace(input)
-		if url == "" {
-			return fmt.Errorf("URL is required")
-		}
 
 		fmt.Print("  Auth token: ")
 		input, _ = reader.ReadString('\n')
 		token = strings.TrimSpace(input)
-		if token == "" {
-			return fmt.Errorf("auth token is required")
-		}
 	}
 
-	Cfg.Sync.URL = url
-	Cfg.Sync.AuthToken = token
+	// 只有用户实际输入了值才写入 config（空值 = 用环境变量）
+	if url != "" {
+		Cfg.Sync.URL = url
+	}
+	if token != "" {
+		Cfg.Sync.AuthToken = token
+	}
 	Cfg.Sync.Enabled = true
 	Cfg.Sync.Interval = "24h"
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	// 用 GetURL/GetAuthToken 获取实际值（含环境变量 fallback）
+	actualURL := Cfg.Sync.GetURL()
+	actualToken := Cfg.Sync.GetAuthToken()
+
+	// 环境变量也没有 → 提示用户设置，跳过首次同步
+	if actualURL == "" || actualToken == "" {
+		fmt.Println()
+		fmt.Println("  ✓ Sync enabled. Set environment variables to start syncing:")
+		fmt.Println()
+		fmt.Println("    export TSUMU_SYNC_URL=\"libsql://your-db.turso.io\"")
+		fmt.Println("    export TSUMU_SYNC_AUTH_TOKEN=\"your-token\"")
+		fmt.Println()
+		return nil
+	}
+
 	// 首次同步：全量 pull + push
 	fmt.Println("  Syncing...")
-	client := sync.NewClient(url, token)
+	client := sync.NewClient(actualURL, actualToken)
 	ctx := context.Background()
-	result := sync.SyncAll(ctx, Store.DB, client, "", nil)
+	result := sync.SyncAll(ctx, Store.DB, client, "", false, nil)
 
 	Cfg.Sync.LastSynced = sync.NowUTC()
 	Cfg.Save()

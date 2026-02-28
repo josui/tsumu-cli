@@ -25,12 +25,18 @@ import (
 // 3 并发 × ~3s/请求 ≈ 1 RPM，留足余量。
 const aiConcurrency = 3
 
+var aiEmpty bool
+
 var aiCmd = &cobra.Command{
 	Use:   "ai",
 	Short: "Enhance existing bookmarks with AI (description + tags)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAI()
 	},
+}
+
+func init() {
+	aiCmd.Flags().BoolVar(&aiEmpty, "empty", false, "only process bookmarks without ai_note")
 }
 
 // aiResult 是单个书签增强的结果，用于 channel 传递。
@@ -49,8 +55,8 @@ func runAI() error {
 
 	client := ai.NewClient(Cfg.AI.GetAPIKey(), Cfg.AI.GetGenModel())
 
-	// 获取需要增强的书签
-	bookmarks, err := db.ListBookmarksForAI(Store.DB, false)
+	// 获取需要增强的书签（--empty 时只跑 ai_note 为空的）
+	bookmarks, err := db.ListBookmarksForAI(Store.DB, aiEmpty)
 	if err != nil {
 		return fmt.Errorf("list bookmarks failed: %w", err)
 	}

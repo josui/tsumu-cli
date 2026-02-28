@@ -7,6 +7,8 @@ package sync
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
 	"strconv"
 )
 
@@ -49,6 +51,7 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 
 	res, err := client.ExecuteOne(ctx, q, args...)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ pull bookmarks failed: %v\n", err)
 		return 0, 0
 	}
 
@@ -75,7 +78,9 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 				id, row[1].Value, row[2].Value, row[3].Value, row[4].Value, row[5].Value,
 				row[6].Value, row[7].Value, clickCount, isFavorite,
 				row[10].Value, row[11].Value, updatedAt, nullableText(row[13]))
-			if err == nil {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ pull insert failed [%s]: %v\n", id[:8], err)
+			} else {
 				newCount++
 			}
 		} else if err == nil && updatedAt > localUpdatedAt {
@@ -91,7 +96,9 @@ func pullBookmarks(ctx context.Context, localDB *sql.DB, client *Client, lastSyn
 				row[1].Value, row[2].Value, row[3].Value, row[4].Value, row[5].Value,
 				row[6].Value, row[7].Value, clickCount, isFavorite,
 				row[10].Value, updatedAt, nullableText(row[13]), id)
-			if err == nil {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ pull update failed [%s]: %v\n", id[:8], err)
+			} else {
 				updCount++
 			}
 		}

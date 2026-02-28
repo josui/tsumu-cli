@@ -13,6 +13,24 @@ import (
 	"time"
 )
 
+// ── Arg 自定义 JSON 序列化 ──
+// Turso Hrana API 对 null 和非 null 类型的 value 字段要求不同：
+//   - null 类型：不应包含 value 字段 → {"type":"null"}
+//   - 其他类型：必须包含 value 字段（即使值为空字符串）→ {"type":"text","value":""}
+// Go 的 omitempty 会把空字符串也省略，导致 TextArg("") 变成 {"type":"text"} 被 API 拒绝。
+
+func (a Arg) MarshalJSON() ([]byte, error) {
+	if a.Type == "null" {
+		return []byte(`{"type":"null"}`), nil
+	}
+	// 非 null 类型：始终包含 value 字段
+	type argWithValue struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	return json.Marshal(argWithValue{a.Type, a.Value})
+}
+
 // Client 是 Turso HTTP API 客户端。
 // 通过 Hrana over HTTP 协议发送 SQL 语句到远端 Turso 数据库。
 type Client struct {

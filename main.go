@@ -72,7 +72,7 @@ func main() {
 	// 静默执行，失败不阻塞正常使用（仅输出警告）。
 	if cfg.Sync.IsEnabled() && cfg.Sync.NeedsSync() {
 		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
-		result := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, nil)
+		result := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, false, nil)
 		cfg.Sync.LastSynced = sync.NowUTC()
 		cfg.Save()
 
