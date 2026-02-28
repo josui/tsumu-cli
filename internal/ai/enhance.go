@@ -15,34 +15,81 @@ import (
 
 // EnhanceResult 是 EnhanceBookmark 的返回结果。
 type EnhanceResult struct {
-	Description string   `json:"description"` // AI 生成的中文摘要（≤100 字）
+	Description string   `json:"description"` // AI 生成的摘要（≤100 字）
+	Keywords    []string `json:"keywords"`    // 多语言搜索关键词
 	Tags        []string `json:"tags"`        // 从已有 tag 库中推荐的标签（1-3 个）
 }
 
-// EnhanceBookmark 一次 API 调用同时生成描述和推荐标签。
-// existingTags 为空时只生成描述，不推荐标签。
-// 相比分别调用 GenerateDescription + SuggestTags，API 调用次数从 2 降到 1。
-func (c *Client) EnhanceBookmark(ctx context.Context, title, url, siteName string, existingTags []string) (*EnhanceResult, error) {
+// buildLangInstruction 根据 lang 配置生成 prompt 中的语言指令部分。
+// 返回 description 使用的语言名 和 keywords 使用的语言列表文本。
+func buildLangInstruction(lang string) (descLang string, keywordLang string) {
+	langs := strings.Split(lang, ",")
+	langNames := map[string]string{
+		"en": "English", "zh": "中文", "ja": "日本語", "ko": "한국어",
+	}
+
+	// 第一个语言用于 description
+	if name, ok := langNames[strings.TrimSpace(langs[0])]; ok {
+		descLang = name
+	} else {
+		descLang = "English"
+	}
+
+	// 所有语言用于 keywords
+	var kwLangs []string
+	for _, l := range langs {
+		l = strings.TrimSpace(l)
+		if name, ok := langNames[l]; ok {
+			kwLangs = append(kwLangs, name)
+		}
+	}
+	if len(kwLangs) == 0 {
+		kwLangs = []string{"English"}
+	}
+	keywordLang = strings.Join(kwLangs, " and ")
+	return
+}
+
+// FormatAiNote 将 description 和 keywords 拼接为 ai_note 存储格式。
+// 格式：description\n\nkeyword1, keyword2, keyword3
+func FormatAiNote(description string, keywords []string) string {
+	if description == "" {
+		return ""
+	}
+	if len(keywords) == 0 {
+		return description
+	}
+	return description + "\n\n" + strings.Join(keywords, ", ")
+}
+
+// EnhanceBookmark 一次 API 调用同时生成描述、关键词和推荐标签。
+// existingTags 为空时只生成描述和关键词，不推荐标签。
+// lang 控制描述和关键词的语言（如 "en", "zh,en"）。
+func (c *Client) EnhanceBookmark(ctx context.Context, title, url, siteName string, existingTags []string, lang string) (*EnhanceResult, error) {
+	descLang, keywordLang := buildLangInstruction(lang)
+
 	var tagInstruction string
 	if len(existingTags) > 0 {
 		tagList := strings.Join(existingTags, ", ")
 		tagInstruction = fmt.Sprintf(`
-2. 从以下已有标签列表中，选择 1-3 个最相关的标签放入 "tags" 数组。只能从列表中选择，不要创造新标签。如果没有相关标签，返回空数组。
+3. 从以下已有标签列表中，选择 1-3 个最相关的标签放入 "tags" 数组。只能从列表中选择，不要创造新标签。如果没有相关标签，返回空数组。
 已有标签: %s`, tagList)
 	} else {
 		tagInstruction = `
-2. "tags" 返回空数组 []。`
+3. "tags" 返回空数组 []。`
 	}
 
-	prompt := fmt.Sprintf(`你是一个书签管理助手。根据以下网页信息完成两个任务，以 JSON 格式返回结果 {"description": "...", "tags": ["..."]}:
+	prompt := fmt.Sprintf(`你是一个书签管理助手。根据以下网页信息完成任务，以 JSON 格式返回结果 {"description": "...", "keywords": ["..."], "tags": ["..."]}:
 
-1. 用中文写一句简短描述（不超过100字），说明这个网页的内容和用途，放入 "description" 字段。不要加引号或其他格式。
+1. 用%s写一句简短描述（不超过100字），说明这个网页的内容和用途，放入 "description" 字段。不要加引号或其他格式。
+
+2. 生成 3-5 个%s搜索关键词，放入 "keywords" 数组。关键词应覆盖网页的核心主题，方便用户用不同语言搜索到这个书签。
 %s
 
 网页信息:
 标题: %s
 URL: %s
-网站: %s`, tagInstruction, title, url, siteName)
+网站: %s`, descLang, keywordLang, tagInstruction, title, url, siteName)
 
 	result, err := c.GenerateJSON(ctx, prompt)
 	if err != nil {
