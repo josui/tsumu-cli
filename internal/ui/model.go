@@ -992,7 +992,9 @@ func (m Model) View() string {
 		header = fmt.Sprintf("tsumu %s", m.query)
 		// AI expand 提示紧跟搜索词，比放在 help 栏更醒目
 		if m.aiAPIKey != "" {
-			header += "  [⇥ AI]"
+			header += "  [Tab → AI Expand]"
+		} else {
+			header += "  [Config AI to Expand]"
 		}
 	}
 	rightParts := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
