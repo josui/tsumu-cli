@@ -8,5 +8,8 @@ docs/
 # Claude Code
 .claude/settings.json
 
+# Worktrees
+.worktrees/
+
 # macOS
 .DS_Store
