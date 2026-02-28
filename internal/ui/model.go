@@ -22,6 +22,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/josui/tsumu-cli/config"
@@ -440,6 +441,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// overlay 激活时，所有按键路由到 overlay
+		if m.overlay != overlayNone {
+			return m.handleOverlayKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 
@@ -571,6 +576,14 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 			m.isError = false
 			return m, m.doRefetch()
 		}
+		return m, nil
+
+	// 打开命令面板
+	case keyCommand:
+		m.overlay = overlayCommand
+		m.cmdFilter = ""
+		m.cmdFiltered = fuzzyMatch("", commands)
+		m.cmdCursor = 0
 		return m, nil
 
 	// AI query expansion：query 非空且 AI 已配置时触发
@@ -768,6 +781,116 @@ func (m Model) handleTextInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// 每次操作都重置光标可见 + 重启闪烁（旧定时器自动失效）
 	return m, m.resetBlink()
 }
+
+// ============================================================
+// Overlay 按键处理
+// ============================================================
+
+// handleOverlayKey 根据当前 overlay 类型分发按键处理
+func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.overlay {
+	case overlayCommand:
+		return m.handleCommandKey(msg)
+	case overlayAddForm:
+		return m.handleAddFormKey(msg)
+	case overlayConfigAI:
+		return m.handleConfigAIKey(msg)
+	case overlayConfigSync:
+		return m.handleConfigSyncKey(msg)
+	case overlaySyncStatus:
+		return m.handleSyncStatusKey(msg)
+	}
+	return m, nil
+}
+
+// handleCommandKey 处理命令面板中的按键（搜索、选择、关闭）
+func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEscape:
+		m.overlay = overlayNone
+		m.cmdFilter = ""
+		return m, nil
+
+	case tea.KeyEnter:
+		if len(m.cmdFiltered) == 0 {
+			return m, nil
+		}
+		selected := commands[m.cmdFiltered[m.cmdCursor]]
+		m.overlay = overlayNone
+		m.cmdFilter = ""
+		return m.executeCommand(selected.name)
+
+	case tea.KeyUp:
+		if m.cmdCursor > 0 {
+			m.cmdCursor--
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		if m.cmdCursor < len(m.cmdFiltered)-1 {
+			m.cmdCursor++
+		}
+		return m, nil
+
+	case tea.KeyBackspace:
+		if len(m.cmdFilter) > 0 {
+			runes := []rune(m.cmdFilter)
+			m.cmdFilter = string(runes[:len(runes)-1])
+			m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
+			m.cmdCursor = 0
+		}
+		return m, nil
+
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.cmdFilter += string(msg.Runes)
+			m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
+			m.cmdCursor = 0
+		}
+		return m, nil
+	}
+}
+
+// executeCommand 执行命令面板中选中的命令
+func (m Model) executeCommand(name string) (tea.Model, tea.Cmd) {
+	switch name {
+	case "add":
+		return m.openAddForm()
+	case "sync":
+		return m.startSync(false)
+	case "sync force":
+		return m.startSync(true)
+	case "sync status":
+		return m.openSyncStatus()
+	case "ai":
+		return m.startAIBatch(false)
+	case "ai empty":
+		return m.startAIBatch(true)
+	case "config ai":
+		return m.openConfigAI()
+	case "config sync":
+		return m.openConfigSync()
+	}
+	return m, nil
+}
+
+// 占位函数（后续 Task 实现）
+func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)    { return m, nil }
+func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)   { return m, nil }
+func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { return m, nil }
+func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEscape || msg.String() == "q" {
+		m.overlay = overlayNone
+	}
+	return m, nil
+}
+
+func (m Model) openAddForm() (tea.Model, tea.Cmd)     { return m, nil }
+func (m Model) startSync(force bool) (tea.Model, tea.Cmd) { return m, nil }
+func (m Model) openSyncStatus() (tea.Model, tea.Cmd)  { return m, nil }
+func (m Model) startAIBatch(emptyOnly bool) (tea.Model, tea.Cmd) { return m, nil }
+func (m Model) openConfigAI() (tea.Model, tea.Cmd)    { return m, nil }
+func (m Model) openConfigSync() (tea.Model, tea.Cmd)  { return m, nil }
 
 // ============================================================
 // 异步命令（tea.Cmd）
@@ -1113,12 +1236,106 @@ func (m Model) View() string {
 	}
 
 	// 操作提示
-	if m.mode == modeNormal {
-		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [n] note  [c] copy  [r] refetch  [q] quit"))
+	if m.mode == modeNormal && m.overlay == overlayNone {
+		b.WriteString(helpStyle.Render("  [↵] open  [/] cmd  [t] tag  [f] fav  [d] del  [n] note  [c] copy  [r] refetch  [q] quit"))
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	base := b.String()
+
+	// overlay 渲染：叠加在列表内容之上
+	if m.overlay != overlayNone {
+		overlay := m.renderOverlay()
+		if overlay != "" {
+			return lipgloss.Place(
+				m.width, lipgloss.Height(base),
+				lipgloss.Center, lipgloss.Center,
+				overlay,
+				lipgloss.WithWhitespaceChars(" "),
+				lipgloss.WithWhitespaceForeground(lipgloss.Color("#333333")),
+			)
+		}
+	}
+
+	return base
+}
+
+// renderOverlay 根据当前 overlay 类型渲染对应的浮层内容
+func (m Model) renderOverlay() string {
+	switch m.overlay {
+	case overlayCommand:
+		return m.renderCommandPalette()
+	case overlayAddForm:
+		return m.renderAddForm()
+	case overlayConfigAI:
+		return m.renderConfigAI()
+	case overlayConfigSync:
+		return m.renderConfigSync()
+	case overlaySyncStatus:
+		return m.renderSyncStatus()
+	}
+	return ""
+}
+
+// 占位渲染函数（后续 Task 实现）
+func (m Model) renderAddForm() string    { return "" }
+func (m Model) renderConfigAI() string   { return "" }
+func (m Model) renderConfigSync() string { return "" }
+func (m Model) renderSyncStatus() string { return "" }
+
+// renderCommandPalette 渲染命令面板：搜索框 + 分类命令列表
+func (m Model) renderCommandPalette() string {
+	var b strings.Builder
+
+	// 标题行
+	title := overlayTitleStyle.Render("Commands")
+	hint := overlayHintStyle.Render("esc")
+	titleWidth := 44 // overlay 内容固定宽度
+	gap := titleWidth - stringWidth(title) - stringWidth(hint)
+	if gap < 2 {
+		gap = 2
+	}
+	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
+
+	// 搜索框
+	searchText := m.cmdFilter
+	if searchText == "" {
+		searchText = overlayHintStyle.Render("Search commands...")
+	}
+	b.WriteString(searchText + "\n\n")
+
+	// 命令列表（按分类分组）
+	lastCategory := ""
+	displayIdx := 0
+	for _, idx := range m.cmdFiltered {
+		cmd := commands[idx]
+		if cmd.category != lastCategory {
+			if lastCategory != "" {
+				b.WriteString("\n")
+			}
+			b.WriteString(overlayCatStyle.Render(cmd.category) + "\n")
+			lastCategory = cmd.category
+		}
+
+		prefix := "  "
+		nameStyle := overlayCmdStyle
+		if displayIdx == m.cmdCursor {
+			prefix = "→ "
+			nameStyle = overlayCmdSelStyle
+		}
+		// name 固定 14 列宽，desc 跟在后面
+		namePad := 14 - stringWidth(cmd.name)
+		if namePad < 2 {
+			namePad = 2
+		}
+		b.WriteString(prefix + nameStyle.Render(cmd.name) + strings.Repeat(" ", namePad) + overlayHintStyle.Render(cmd.desc) + "\n")
+		displayIdx++
+	}
+
+	// 底部提示
+	b.WriteString("\n" + overlayHintStyle.Render("enter select · esc close"))
+
+	return overlayBorderStyle.Render(b.String())
 }
 
 // renderDefault 渲染默认模式的单条书签。isFocused 控制高亮。

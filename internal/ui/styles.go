@@ -37,3 +37,30 @@ var (
 	suggestStyle      = lipgloss.NewStyle().Foreground(colorDim)
 	suggestSelStyle   = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
 )
+
+// Overlay 样式
+var (
+	overlayBorderStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorDim).
+		Padding(1, 2)
+	overlayTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
+	overlayHintStyle   = lipgloss.NewStyle().Foreground(colorDim)
+	overlayCmdStyle    = lipgloss.NewStyle()
+	overlayCmdSelStyle = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	overlayCatStyle    = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	overlayInputStyle  = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(colorDim).
+		Padding(0, 1)
+	overlayLabelStyle = lipgloss.NewStyle().Foreground(colorDim)
+	overlayFieldStyle = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(colorDim).
+		Padding(0, 1)
+	overlayFieldFocusStyle = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(colorPrimary).
+		Padding(0, 1)
+	overlaySelectedStyle = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+)
