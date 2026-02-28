@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -29,6 +30,7 @@ import (
 	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
 	"github.com/josui/tsumu-cli/internal/meta"
+	"github.com/josui/tsumu-cli/internal/sync"
 )
 
 // ============================================================
@@ -120,6 +122,14 @@ type Model struct {
 	cmdFilter   string      // 命令面板搜索框输入
 	cmdFiltered []int       // 过滤后的 commands 索引
 	cmdCursor   int         // 命令面板中的光标位置
+
+	// Add 表单
+	addFields     [3]string // 0=URL, 1=Tags, 2=Note
+	addFocus      int       // 当前聚焦的字段 (0-2)
+	addSubmitting bool      // 正在提交中
+
+	// 后台任务
+	bgTaskLabel string // header 右侧显示的任务进度文本（空 = 无任务）
 }
 
 // NewModel 创建并初始化 Model。
@@ -219,6 +229,27 @@ type refetchResultMsg struct {
 	title string // 更新后的标题（显示用）
 	hasAI bool   // 是否执行了 AI 增强
 	err   error
+}
+
+// addBookmarkMsg 是添加书签完成后的消息
+type addBookmarkMsg struct {
+	title    string
+	siteName string
+	bmID     string // 用于后台 AI 增强
+	err      error
+}
+
+// aiEnhanceDoneMsg 是单个书签后台 AI 增强完成的消息
+type aiEnhanceDoneMsg struct {
+	title string
+	err   error
+}
+
+// syncDoneMsg 是 sync 完成后的消息
+type syncDoneMsg struct {
+	result  sync.Result
+	warning string
+	err     error
 }
 
 func (m Model) doAIExpand() tea.Cmd {
@@ -426,6 +457,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = fmt.Sprintf("✓ Refetched (no AI): %s", msg.title)
 		}
 		m.isError = false
+		refreshSyncStatus(&m)
+		return m, m.doSearch()
+
+	case addBookmarkMsg:
+		m.addSubmitting = false
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Add failed: %v", msg.err)
+			m.isError = true
+			m.overlay = overlayNone
+			return m, nil
+		}
+		m.overlay = overlayNone
+		displayName := msg.title
+		if displayName == "" {
+			displayName = msg.siteName
+		}
+		m.message = fmt.Sprintf("✓ Added: %s", displayName)
+		m.isError = false
+
+		// 后台 AI 增强
+		var aiCmd tea.Cmd
+		if m.cfg.AI.IsConfigured() && msg.bmID != "" {
+			aiCmd = m.doBackgroundAIEnhance(msg.bmID)
+		}
+		return m, tea.Batch(m.doSearch(), aiCmd)
+
+	case aiEnhanceDoneMsg:
+		if msg.err == nil {
+			m.message = fmt.Sprintf("✦ AI enhanced: %s", msg.title)
+			m.isError = false
+			return m, m.doSearch()
+		}
+		return m, nil
+
+	case syncDoneMsg:
+		m.bgTaskLabel = ""
+		if msg.err != nil {
+			m.message = fmt.Sprintf("⚠ Sync failed: %v", msg.err)
+			m.isError = true
+			return m, nil
+		}
+		pulled := msg.result.PulledNew + msg.result.PulledUpdated
+		pushed := msg.result.PushedNew + msg.result.PushedUpdated
+		if pulled > 0 || pushed > 0 {
+			m.message = fmt.Sprintf("✓ Synced: ↓%d ↑%d", pulled, pushed)
+		} else {
+			m.message = "✓ Already up to date"
+		}
+		if msg.warning != "" {
+			m.message += " ⚠ " + msg.warning
+		}
+		m.isError = false
+		m.lastSynced = m.cfg.Sync.LastSynced
 		refreshSyncStatus(&m)
 		return m, m.doSearch()
 
@@ -874,10 +958,61 @@ func (m Model) executeCommand(name string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleAddFormKey 处理 Add 表单的按键
+func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.addSubmitting {
+		return m, nil // 提交中忽略按键
+	}
+
+	switch msg.Type {
+	case tea.KeyEscape:
+		m.overlay = overlayNone
+		return m, nil
+
+	case tea.KeyTab:
+		m.addFocus = (m.addFocus + 1) % 3
+		return m, nil
+
+	case tea.KeyShiftTab:
+		m.addFocus = (m.addFocus + 2) % 3
+		return m, nil
+
+	case tea.KeyEnter:
+		url := strings.TrimSpace(m.addFields[0])
+		if url == "" {
+			m.message = "URL is required"
+			m.isError = true
+			return m, nil
+		}
+		m.addSubmitting = true
+		return m, m.doAddBookmark(url, m.addFields[1], m.addFields[2])
+
+	case tea.KeyBackspace:
+		runes := []rune(m.addFields[m.addFocus])
+		if len(runes) > 0 {
+			m.addFields[m.addFocus] = string(runes[:len(runes)-1])
+		}
+		return m, nil
+
+	case tea.KeyCtrlU:
+		m.addFields[m.addFocus] = ""
+		return m, nil
+
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.addFields[m.addFocus] += string(msg.Runes)
+		} else if msg.Type == tea.KeySpace {
+			m.addFields[m.addFocus] += " "
+		}
+		return m, nil
+	}
+}
+
 // 占位函数（后续 Task 实现）
-func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)    { return m, nil }
 func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)   { return m, nil }
 func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { return m, nil }
+
+// handleSyncStatusKey 处理 Sync Status 卡片的按键（esc/q 关闭）
 func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyEscape || msg.String() == "q" {
 		m.overlay = overlayNone
@@ -885,12 +1020,36 @@ func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) openAddForm() (tea.Model, tea.Cmd)     { return m, nil }
-func (m Model) startSync(force bool) (tea.Model, tea.Cmd) { return m, nil }
-func (m Model) openSyncStatus() (tea.Model, tea.Cmd)  { return m, nil }
+// openAddForm 打开添加书签表单
+func (m Model) openAddForm() (tea.Model, tea.Cmd) {
+	m.overlay = overlayAddForm
+	m.addFields = [3]string{"", "", ""}
+	m.addFocus = 0
+	m.addSubmitting = false
+	return m, nil
+}
+
+// startSync 启动后台同步
+func (m Model) startSync(force bool) (tea.Model, tea.Cmd) {
+	if !m.cfg.Sync.CanSync() {
+		m.message = "Sync not configured. Use /config sync"
+		m.isError = true
+		return m, nil
+	}
+	m.bgTaskLabel = "⟳ syncing..."
+	return m, m.doSync(force)
+}
+
+// openSyncStatus 打开 Sync 状态卡片
+func (m Model) openSyncStatus() (tea.Model, tea.Cmd) {
+	m.overlay = overlaySyncStatus
+	return m, nil
+}
+
+// 占位函数（后续 Task 实现）
 func (m Model) startAIBatch(emptyOnly bool) (tea.Model, tea.Cmd) { return m, nil }
-func (m Model) openConfigAI() (tea.Model, tea.Cmd)    { return m, nil }
-func (m Model) openConfigSync() (tea.Model, tea.Cmd)  { return m, nil }
+func (m Model) openConfigAI() (tea.Model, tea.Cmd)               { return m, nil }
+func (m Model) openConfigSync() (tea.Model, tea.Cmd)             { return m, nil }
 
 // ============================================================
 // 异步命令（tea.Cmd）
@@ -1128,6 +1287,130 @@ func (m Model) doRefetch() tea.Cmd {
 	}
 }
 
+// cleanURL 去除 URL 中的 query 和 fragment 参数
+func cleanURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// doAddBookmark 异步添加书签：抓取元数据 → 写数据库 → 自动打 domain tag
+func (m Model) doAddBookmark(rawURL, tagsStr, note string) tea.Cmd {
+	database := m.db
+	cfg := m.cfg
+	return func() tea.Msg {
+		cleanedURL := cleanURL(rawURL)
+
+		// 抓取元数据
+		metadata, err := meta.Fetch(rawURL)
+		if err != nil {
+			metadata = &meta.Metadata{
+				Title:    cleanedURL,
+				SiteName: cleanedURL,
+			}
+		}
+
+		// 写数据库
+		bm, err := db.CreateBookmark(database, cleanedURL, metadata.Title, metadata.Description, metadata.SiteName, strings.TrimSpace(note))
+		if err != nil {
+			return addBookmarkMsg{err: err}
+		}
+
+		// 解析 tags
+		var tagList []string
+		if tagsStr != "" {
+			for _, t := range strings.Split(tagsStr, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					tagList = append(tagList, t)
+				}
+			}
+		}
+		// Domain auto-tag
+		if cfg != nil && len(cfg.DomainTags) > 0 {
+			domain := meta.ExtractDomain(rawURL)
+			if autoTag, ok := cfg.DomainTags[domain]; ok && autoTag != "" {
+				found := false
+				for _, t := range tagList {
+					if t == autoTag {
+						found = true
+						break
+					}
+				}
+				if !found {
+					tagList = append(tagList, autoTag)
+				}
+			}
+		}
+		if len(tagList) > 0 {
+			_ = db.AddTagsToBookmark(database, bm.ID, tagList)
+		}
+
+		return addBookmarkMsg{title: bm.Title, siteName: bm.SiteName, bmID: bm.ID}
+	}
+}
+
+// doBackgroundAIEnhance 异步增强单个书签的 AI note 和 tags
+func (m Model) doBackgroundAIEnhance(bookmarkID string) tea.Cmd {
+	database := m.db
+	apiKey := m.cfg.AI.GetAPIKey()
+	genModel := m.cfg.AI.GetGenModel()
+	lang := m.cfg.AI.GetLang()
+	return func() tea.Msg {
+		bm, err := db.GetBookmarkByID(database, bookmarkID)
+		if err != nil || bm == nil {
+			return aiEnhanceDoneMsg{err: fmt.Errorf("bookmark not found")}
+		}
+
+		allTags, _ := db.ListAllTags(database)
+		client := ai.NewClient(apiKey, genModel)
+		result, err := client.EnhanceBookmark(context.Background(), bm.Title, bm.URL, bm.SiteName, allTags, lang)
+		if err != nil {
+			return aiEnhanceDoneMsg{title: bm.Title, err: err}
+		}
+
+		if result.Description != "" {
+			note := ai.FormatAiNote(result.Description, result.Keywords)
+			_ = db.UpdateAiNote(database, bookmarkID, note)
+		}
+		if len(result.Tags) > 0 {
+			_ = db.AddTagsToBookmark(database, bookmarkID, result.Tags)
+		}
+
+		return aiEnhanceDoneMsg{title: bm.Title}
+	}
+}
+
+// doSync 异步执行同步操作
+func (m Model) doSync(force bool) tea.Cmd {
+	database := m.db
+	cfg := m.cfg
+	return func() tea.Msg {
+		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
+		ctx := context.Background()
+
+		mode := sync.SyncIncremental
+		if force {
+			mode = sync.SyncFull
+		}
+
+		result, err := sync.SyncAll(ctx, database, client, cfg.Sync.LastSynced, mode, nil)
+		if err != nil {
+			return syncDoneMsg{err: err}
+		}
+
+		// 更新 config（last_synced）
+		cfg.Sync.LastSynced = sync.NowUTC()
+		cfg.Save()
+
+		return syncDoneMsg{result: result, warning: result.Warning}
+	}
+}
+
 // ============================================================
 // View 渲染
 // ============================================================
@@ -1150,9 +1433,14 @@ func (m Model) View() string {
 			header += "  [⇥ AI]"
 		}
 	}
+	// 右侧状态：bgTaskLabel 优先于 syncStatus
+	rightStatus := m.syncStatus
+	if m.bgTaskLabel != "" {
+		rightStatus = m.bgTaskLabel
+	}
 	rightParts := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
-	if m.syncStatus != "" {
-		rightParts += "  " + m.syncStatus
+	if rightStatus != "" {
+		rightParts += "  " + rightStatus
 	}
 	cw := m.contentWidth()
 	gap := cw - stringWidth(header) - stringWidth(rightParts)
@@ -1277,11 +1565,111 @@ func (m Model) renderOverlay() string {
 	return ""
 }
 
+// renderAddForm 渲染 Add Bookmark 表单
+func (m Model) renderAddForm() string {
+	var b strings.Builder
+	w := 44
+
+	// 标题
+	title := overlayTitleStyle.Render("Add Bookmark")
+	hint := overlayHintStyle.Render("esc")
+	gap := w - stringWidth(title) - stringWidth(hint)
+	if gap < 2 {
+		gap = 2
+	}
+	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
+
+	labels := [3]string{"URL", "Tags (comma separated, optional)", "Note (optional)"}
+	placeholders := [3]string{"Paste URL here...", "", ""}
+
+	for i := 0; i < 3; i++ {
+		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
+
+		content := m.addFields[i]
+		if content == "" && placeholders[i] != "" && !m.addSubmitting {
+			content = overlayHintStyle.Render(placeholders[i])
+		}
+
+		fieldStyle := overlayFieldStyle
+		if i == m.addFocus && !m.addSubmitting {
+			fieldStyle = overlayFieldFocusStyle
+		}
+
+		// 固定宽度输入框
+		fieldContent := content
+		if stringWidth(fieldContent) < w-4 {
+			fieldContent += strings.Repeat(" ", w-4-stringWidth(fieldContent))
+		}
+		b.WriteString(fieldStyle.Render(fieldContent) + "\n")
+
+		if i < 2 {
+			b.WriteString("\n")
+		}
+	}
+
+	if m.addSubmitting {
+		b.WriteString("\n" + messageStyle.Render("⟳ Fetching metadata..."))
+	} else {
+		b.WriteString("\n" + overlayHintStyle.Render("tab next · shift+tab prev · enter submit"))
+	}
+
+	return overlayBorderStyle.Render(b.String())
+}
+
+// renderSyncStatus 渲染 Sync 状态卡片
+func (m Model) renderSyncStatus() string {
+	var b strings.Builder
+	w := 44
+
+	title := overlayTitleStyle.Render("Sync Status")
+	hint := overlayHintStyle.Render("esc")
+	gap := w - stringWidth(title) - stringWidth(hint)
+	if gap < 2 {
+		gap = 2
+	}
+	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
+
+	if !m.cfg.Sync.CanSync() {
+		b.WriteString("  Status     " + errorMessageStyle.Render("● Not configured") + "\n")
+		b.WriteString("\n" + overlayHintStyle.Render("Use /config sync to set up"))
+	} else {
+		b.WriteString("  Status     " + messageStyle.Render("● Connected") + "\n")
+		b.WriteString("  Database   " + m.cfg.Sync.GetURL() + "\n")
+
+		if m.cfg.Sync.LastSynced != "" {
+			last, err := time.Parse(time.RFC3339, m.cfg.Sync.LastSynced)
+			if err == nil {
+				b.WriteString(fmt.Sprintf("  Last sync  %s\n", last.Local().Format("2006-01-02 15:04:05")))
+			}
+		} else {
+			b.WriteString("  Last sync  never\n")
+		}
+
+		pending := sync.PendingCount(m.db, m.cfg.Sync.LastSynced)
+		if pending > 0 {
+			b.WriteString(fmt.Sprintf("  Pending    %d bookmarks\n", pending))
+		} else {
+			b.WriteString("  Pending    all synced\n")
+		}
+
+		interval := m.cfg.Sync.Interval
+		if interval == "" {
+			interval = "24h"
+		}
+		autoSync := "Enabled"
+		if !m.cfg.Sync.IsEnabled() {
+			autoSync = "Disabled"
+		}
+		b.WriteString(fmt.Sprintf("  Auto sync  %s (%s interval)\n", autoSync, interval))
+	}
+
+	b.WriteString("\n" + overlayHintStyle.Render("esc close"))
+	return overlayBorderStyle.Render(b.String())
+}
+
 // 占位渲染函数（后续 Task 实现）
-func (m Model) renderAddForm() string    { return "" }
 func (m Model) renderConfigAI() string   { return "" }
 func (m Model) renderConfigSync() string { return "" }
-func (m Model) renderSyncStatus() string { return "" }
 
 // renderCommandPalette 渲染命令面板：搜索框 + 分类命令列表
 func (m Model) renderCommandPalette() string {
