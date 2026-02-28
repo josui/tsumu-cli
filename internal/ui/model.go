@@ -44,6 +44,37 @@ const (
 	modeConfirm                  // 删除确认模式：y 确认，其他键取消
 )
 
+// overlayType 表示当前显示的 overlay 类型
+type overlayType int
+
+const (
+	overlayNone       overlayType = iota // 无 overlay
+	overlayCommand                       // 命令面板
+	overlayAddForm                       // 添加书签表单
+	overlayConfigAI                      // AI 配置表单
+	overlayConfigSync                    // Sync 配置表单
+	overlaySyncStatus                    // Sync 状态卡片
+)
+
+// command 是命令面板中的一条命令
+type command struct {
+	name     string // 显示名，如 "add"
+	desc     string // 描述，如 "Add new bookmark"
+	category string // 分类，如 "Bookmarks"
+}
+
+// commands 是所有可用命令（按分类排列）
+var commands = []command{
+	{name: "add", desc: "Add new bookmark", category: "Bookmarks"},
+	{name: "sync", desc: "Pull & push changes", category: "Sync"},
+	{name: "sync force", desc: "Full resync", category: "Sync"},
+	{name: "sync status", desc: "View sync status", category: "Sync"},
+	{name: "ai", desc: "Enhance all bookmarks", category: "AI"},
+	{name: "ai empty", desc: "Enhance empty only", category: "AI"},
+	{name: "config ai", desc: "Configure AI provider", category: "Config"},
+	{name: "config sync", desc: "Configure Turso sync", category: "Config"},
+}
+
 // ============================================================
 // Model 定义
 // ============================================================
@@ -82,6 +113,12 @@ type Model struct {
 
 	// AI query expansion
 	aiExpanding bool // 是否正在 AI 展开中
+
+	// Overlay 状态
+	overlay     overlayType // 当前显示的 overlay
+	cmdFilter   string      // 命令面板搜索框输入
+	cmdFiltered []int       // 过滤后的 commands 索引
+	cmdCursor   int         // 命令面板中的光标位置
 }
 
 // NewModel 创建并初始化 Model。
@@ -1196,6 +1233,26 @@ func truncate(s string, maxWidth int) string {
 		return s
 	}
 	return runewidth.Truncate(s, maxWidth, "..")
+}
+
+// fuzzyMatch 简单的子串匹配（name 和 desc 都参与）
+func fuzzyMatch(query string, cmds []command) []int {
+	if query == "" {
+		result := make([]int, len(cmds))
+		for i := range cmds {
+			result[i] = i
+		}
+		return result
+	}
+	query = strings.ToLower(query)
+	var result []int
+	for i, cmd := range cmds {
+		if strings.Contains(strings.ToLower(cmd.name), query) ||
+			strings.Contains(strings.ToLower(cmd.desc), query) {
+			result = append(result, i)
+		}
+	}
+	return result
 }
 
 func OpenBrowser(url string) error {
