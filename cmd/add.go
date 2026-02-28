@@ -5,16 +5,14 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	neturl "net/url"
+	"os"
+	"os/exec"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
 	"github.com/josui/tsumu-cli/internal/meta"
 )
@@ -112,43 +110,15 @@ func runAdd(rawURL string, note string, tags string) error {
 		fmt.Printf("  ✓ Tagged: %s\n", strings.Join(tagList, ", "))
 	}
 
-	// ── AI 增强（后台执行，先让用户看到 Saved，等 AI 完成再退出）──
+	// ── AI 增强（后台子进程，不阻塞 add 命令）──
 	if Cfg != nil && Cfg.AI.IsConfigured() {
-		allTags, _ := db.ListAllTags(Store.DB)
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			client := ai.NewClient(Cfg.AI.GetAPIKey(), Cfg.AI.GetGenModel())
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-
-			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags, Cfg.AI.GetLang())
-			if err != nil {
-				return
-			}
-
-			// 写入 ai_note（description + keywords 拼接）
-			if result.Description != "" {
-				note := ai.FormatAiNote(result.Description, result.Keywords)
-				_ = db.UpdateAiNote(Store.DB, bm.ID, note)
-			}
-
-			// AI 推荐的标签（叠加不覆盖已有标签）
-			if len(result.Tags) > 0 {
-				var newTags []string
-				for _, t := range result.Tags {
-					if !containsTag(tagList, t) {
-						newTags = append(newTags, t)
-					}
-				}
-				if len(newTags) > 0 {
-					_ = db.AddTagsToBookmark(Store.DB, bm.ID, newTags)
-					fmt.Printf("  ✓ AI tagged: %s\n", strings.Join(newTags, ", "))
-				}
-			}
-		}()
-		wg.Wait()
+		fmt.Println("  ⠋ AI enhancing in background...")
+		exe, err := os.Executable()
+		if err == nil {
+			proc := exec.Command(exe, "ai-enhance", "--id", bm.ID)
+			proc.Stderr = os.Stderr // AI 错误输出到终端 stderr
+			_ = proc.Start()        // 启动后不等待
+		}
 	}
 
 	return nil
