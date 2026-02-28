@@ -39,12 +39,15 @@ func SetBookmarkTags(database *sql.DB, bookmarkID string, tagNames []string) err
 	}
 	defer tx.Rollback()
 
-	// Remove all existing tag associations
-	if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id = ?`, bookmarkID); err != nil {
+	// soft delete 现有关联
+	if _, err := tx.Exec(
+		`UPDATE bookmark_tags SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+		                          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE bookmark_id = ? AND deleted_at IS NULL`, bookmarkID); err != nil {
 		return fmt.Errorf("clear tags failed: %w", err)
 	}
 
-	// Add new tags
+	// 添加新标签关联（先尝试恢复已 soft delete 的，不存在再新建）
 	for _, name := range tagNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -54,11 +57,24 @@ func SetBookmarkTags(database *sql.DB, bookmarkID string, tagNames []string) err
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)`,
-			bookmarkID, tagID,
-		); err != nil {
-			return fmt.Errorf("link tag to bookmark failed: %w", err)
+		// 尝试恢复已 soft delete 的关联
+		result, err := tx.Exec(
+			`UPDATE bookmark_tags SET deleted_at = NULL,
+			                          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+			 WHERE bookmark_id = ? AND tag_id = ? AND deleted_at IS NOT NULL`,
+			bookmarkID, tagID)
+		if err != nil {
+			return fmt.Errorf("restore bookmark_tag: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		if affected == 0 {
+			// 不存在，新建关联
+			_, err = tx.Exec(
+				`INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`,
+				bookmarkID, tagID)
+			if err != nil {
+				return fmt.Errorf("insert bookmark_tag: %w", err)
+			}
 		}
 	}
 
@@ -93,13 +109,24 @@ func AddTagsToBookmark(db *sql.DB, bookmarkID string, tagNames []string) error {
 			return err
 		}
 
-		// 关联书签和标签（INSERT OR IGNORE 避免重复关联报错）
-		_, err = tx.Exec(
-			`INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id) VALUES (?, ?)`,
-			bookmarkID, tagID,
-		)
+		// 尝试恢复已 soft delete 的关联
+		result, err := tx.Exec(
+			`UPDATE bookmark_tags SET deleted_at = NULL,
+			                          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+			 WHERE bookmark_id = ? AND tag_id = ? AND deleted_at IS NOT NULL`,
+			bookmarkID, tagID)
 		if err != nil {
-			return fmt.Errorf("link tag to bookmark failed: %w", err)
+			return fmt.Errorf("restore bookmark_tag: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		if affected == 0 {
+			// 不存在，新建关联（INSERT OR IGNORE 避免重复关联报错）
+			_, err = tx.Exec(
+				`INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`,
+				bookmarkID, tagID)
+			if err != nil {
+				return fmt.Errorf("insert bookmark_tag: %w", err)
+			}
 		}
 	}
 
@@ -143,7 +170,7 @@ func syncTagsText(tx *sql.Tx, bookmarkID string) error {
 		     SELECT COALESCE(GROUP_CONCAT(t.name, ','), '')
 		     FROM bookmark_tags bt
 		     JOIN tags t ON bt.tag_id = t.id
-		     WHERE bt.bookmark_id = ?
+		     WHERE bt.bookmark_id = ? AND bt.deleted_at IS NULL
 		 ),
 		 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 		 WHERE id = ?`,

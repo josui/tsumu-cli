@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/josui/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/internal/sync"
 )
 
 // sync flag
@@ -56,91 +57,42 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncOff, "off", false, "disable sync")
 }
 
-// runSyncManual 手动触发同步。
-// libSQL embedded replica 只推送通过 connector 写入的数据，
-// 本地直写（tsumu add 等）不会自动推送。
-// 因此 sync 需要：读本地 → 拉远端 → merge 本地独有数据 → 推送。
+// runSyncManual 手动触发双向同步。
+// 流程：Pull（远端 → 本地）→ Push（本地 → 远端）→ 更新 last_synced。
 func runSyncManual() error {
-	if !Store.IsSynced() {
+	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
 		fmt.Println("  Sync not configured. Run: tsumu sync --setup")
 		return nil
 	}
 
-	// 1. 从当前连接读取本地全量数据到内存
-	localBookmarks, err := db.ReadAllBookmarksFromDB(Store.DB)
-	if err != nil {
-		return fmt.Errorf("read local bookmarks: %w", err)
-	}
-	localTags, _ := db.ReadAllTagsFromDB(Store.DB)
-	localLinks, _ := db.ReadAllBookmarkTagsFromDB(Store.DB)
+	client := sync.NewClient(Cfg.Sync.GetURL(), Cfg.Sync.GetAuthToken())
+	ctx := context.Background()
 
-	// 2. 关闭本地连接
-	Store.DB.Close()
+	result := sync.SyncAll(ctx, Store.DB, client, Cfg.Sync.LastSynced, func(msg string) {
+		fmt.Printf("\r  ⠋ %s", msg)
+	})
 
-	// 3. 删除本地 db 文件（embedded replica 需要从零创建）
-	dbPath := Cfg.DBPath()
-	for _, suffix := range []string{"", "-wal", "-shm", "-info"} {
-		os.Remove(dbPath + suffix)
-	}
-
-	// 4. 用 embedded replica connector 重新打开
-	syncOpts := &db.SyncOpts{
-		PrimaryURL: Cfg.Sync.GetURL(),
-		AuthToken:  Cfg.Sync.GetAuthToken(),
-	}
-	newStore, err := db.OpenStoreWithConnector(dbPath, syncOpts)
-	if err != nil {
-		// 失败时尝试恢复本地连接
-		Store.ReopenLocal()
-		return fmt.Errorf("connect to remote: %w", err)
-	}
-
-	// 5. 拉取远端数据
-	_, err = newStore.Sync()
-	if err != nil {
-		newStore.Close()
-		Store.ReopenLocal()
-		return fmt.Errorf("pull remote: %w", err)
-	}
-
-	// 6. 把本地独有数据通过 connector 写入（这样才会推送到云端）
-	imported, err := db.MergeFromBackup(newStore.DB, localBookmarks, localTags, localLinks)
-	if err != nil {
-		newStore.Close()
-		Store.ReopenLocal()
-		return fmt.Errorf("merge: %w", err)
-	}
-
-	// 7. 推送合并后的数据到云端
-	_, err = newStore.Sync()
-	if err != nil {
-		newStore.Close()
-		Store.ReopenLocal()
-		return fmt.Errorf("push to remote: %w", err)
-	}
-
-	// 8. 关闭 connector，重开本地模式
-	newStore.Close()
-	if err := Store.ReopenLocal(); err != nil {
-		return fmt.Errorf("reopen local: %w", err)
-	}
-
-	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
+	Cfg.Sync.LastSynced = sync.NowUTC()
 	Cfg.Save()
 
-	if imported > 0 {
-		fmt.Printf("  ✓ Synced (%d new pushed)\n", imported)
+	// 清除进度行，显示结果
+	fmt.Print("\r")
+	pulled := result.PulledNew + result.PulledUpdated
+	pushed := result.PushedNew + result.PushedUpdated
+	if pulled > 0 || pushed > 0 {
+		fmt.Printf("  ✓ Pulled: %d new, %d updated\n", result.PulledNew, result.PulledUpdated)
+		fmt.Printf("  ✓ Pushed: %d new, %d updated\n", result.PushedNew, result.PushedUpdated)
 	} else {
-		fmt.Println("  ✓ Synced")
+		fmt.Println("  ✓ Already up to date")
 	}
+
 	return nil
 }
 
-// runSyncSetup 交互式配置 Turso 同步
+// runSyncSetup 交互式配置同步（URL/token 输入 → 首次全量同步）
 func runSyncSetup() error {
 	reader := bufio.NewReader(os.Stdin)
 
-	// 如果已有配置，询问是否使用已有的
 	url := Cfg.Sync.URL
 	token := Cfg.Sync.AuthToken
 
@@ -171,83 +123,31 @@ func runSyncSetup() error {
 		}
 	}
 
-	// 直接从当前连接读取本地数据到内存（在关闭连接前）
-	dbPath := Cfg.DBPath()
-	localBookmarks, err := db.ReadAllBookmarksFromDB(Store.DB)
-	if err != nil {
-		localBookmarks = nil
-	}
-	var localTags []db.LocalTag
-	var localLinks []db.BookmarkTagLink
-	if len(localBookmarks) > 0 {
-		fmt.Printf("  Found %d local bookmarks.\n", len(localBookmarks))
-		localTags, _ = db.ReadAllTagsFromDB(Store.DB)
-		localLinks, _ = db.ReadAllBookmarkTagsFromDB(Store.DB)
-	}
-
-	// 关闭连接
-	Store.Close()
-
-	// 删除旧的本地 db 文件：embedded replica 需要从零创建，
-	// 已有的纯本地 db 没有 metadata 文件会导致 sync 失败。
-	// 备份已保存，数据会在 merge 阶段导回。
-	for _, suffix := range []string{"", "-wal", "-shm", "-info"} {
-		os.Remove(dbPath + suffix)
-	}
-
-	// 用 embedded replica 重新打开（连接远端）
-	fmt.Println("  Connecting to remote...")
-	syncOpts := &db.SyncOpts{
-		PrimaryURL: url,
-		AuthToken:  token,
-	}
-	newStore, err := db.OpenStoreWithConnector(dbPath, syncOpts)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-
-	// 替换全局 Store
-	*Store = *newStore
-
-	// 首次 sync — 拉取远端数据
-	_, err = Store.Sync()
-	if err != nil {
-		return fmt.Errorf("initial sync failed: %w", err)
-	}
-
-	// 如果有本地数据，合并导入
-	if len(localBookmarks) > 0 {
-		fmt.Println("  Merging local data...")
-		imported, mergeErr := db.MergeFromBackup(Store.DB, localBookmarks, localTags, localLinks)
-		if mergeErr != nil {
-			return fmt.Errorf("merge failed: %w", mergeErr)
-		}
-
-		// 合并后 sync 一次，把数据推到远端
-		Store.Sync()
-
-		var remoteCount int
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&remoteCount)
-		fmt.Printf("  Merged: %d imported, %d total\n", imported, remoteCount)
-	} else {
-		var count int
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&count)
-		if count > 0 {
-			fmt.Printf("  Downloaded %d bookmarks from cloud.\n", count)
-		}
-	}
-
-	// 保存配置
 	Cfg.Sync.URL = url
 	Cfg.Sync.AuthToken = token
 	Cfg.Sync.Enabled = true
 	Cfg.Sync.Interval = "24h"
-	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Println("  Sync enabled.")
+	// 首次同步：全量 pull + push
+	fmt.Println("  Syncing...")
+	client := sync.NewClient(url, token)
+	ctx := context.Background()
+	result := sync.SyncAll(ctx, Store.DB, client, "", nil)
+
+	Cfg.Sync.LastSynced = sync.NowUTC()
+	Cfg.Save()
+
+	pulled := result.PulledNew + result.PulledUpdated
+	pushed := result.PushedNew + result.PushedUpdated
+	if pulled > 0 || pushed > 0 {
+		fmt.Printf("  ✓ Synced: pulled %d, pushed %d\n", pulled, pushed)
+	} else {
+		fmt.Println("  ✓ Sync configured")
+	}
+
 	return nil
 }
 
@@ -273,10 +173,10 @@ func runSyncStatus() error {
 			fmt.Printf("  Last:    %s (%s)\n", formatDuration(time.Since(last)), last.Local().Format("2006-01-02 15:04"))
 		}
 
-		// 本地变更检测
+		// 本地变更检测（排除已 soft delete 的记录）
 		var total, pending int
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&total)
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ?", Cfg.Sync.LastSynced).Scan(&pending)
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE deleted_at IS NULL").Scan(&total)
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ? AND deleted_at IS NULL", Cfg.Sync.LastSynced).Scan(&pending)
 		if pending > 0 {
 			fmt.Printf("  Data:    %d bookmarks pending sync\n", pending)
 		} else {
@@ -285,7 +185,7 @@ func runSyncStatus() error {
 	} else {
 		fmt.Printf("  Last:    never\n")
 		var total int
-		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks").Scan(&total)
+		Store.DB.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE deleted_at IS NULL").Scan(&total)
 		fmt.Printf("  Data:    never synced (%d bookmarks)\n", total)
 	}
 	return nil

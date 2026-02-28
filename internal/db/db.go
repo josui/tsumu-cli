@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tursodatabase/go-libsql" // libSQL 驱动 + embedded replica API
-	// 直接 import（不带下划线）会同时执行 init() 注册驱动，
-	// 所以不需要再重复下划线 import。
+	_ "modernc.org/sqlite" // 纯 Go SQLite driver，注册 "sqlite" driver
 )
 
 // migrationV1 是初始建表 SQL。
@@ -34,7 +32,8 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     is_favorite INTEGER NOT NULL DEFAULT 0,
     source      TEXT NOT NULL DEFAULT 'cli',                               -- 'manual'|'chrome'|'cli' 等
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    deleted_at  TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_bookmarks_created  ON bookmarks(created_at DESC);
@@ -55,6 +54,8 @@ CREATE TABLE IF NOT EXISTS tags (
 CREATE TABLE IF NOT EXISTS bookmark_tags (
     bookmark_id TEXT NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
     tag_id      TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    deleted_at  TEXT DEFAULT NULL,
     PRIMARY KEY (bookmark_id, tag_id)
 );
 
@@ -77,7 +78,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
 );
 
 -- FTS5 同步触发器：bookmarks 表增删改时自动同步到 FTS 索引
-CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+-- INSERT 触发器只对未删除的记录建索引（deleted_at IS NULL）
+CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks
+WHEN new.deleted_at IS NULL
+BEGIN
     INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
     VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
 END;
@@ -87,155 +91,45 @@ CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
     VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
 END;
 
+-- UPDATE 触发器：先删旧索引（仅当旧记录未删除时），再加新索引（仅当新记录未删除时）
 CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
     INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
-    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
+    SELECT 'delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text
+    WHERE old.deleted_at IS NULL;
     INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
-    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
+    SELECT new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text
+    WHERE new.deleted_at IS NULL;
 END;
 
 `
 
-// Store 包装数据库连接和可选的 sync 配置。
-// 下游代码通过 Store.DB 获取 *sql.DB，无需关心是否启用了同步。
-// DB 始终以纯本地模式打开（快速启动），sync 时按需创建 connector。
+// Store 包装本地 SQLite 数据库连接。
 type Store struct {
-	DB        *sql.DB
-	Connector *libsql.Connector // 仅 OpenStoreWithConnector 时非 nil
-	dbPath    string
-	syncCfg   *SyncOpts
+	DB     *sql.DB
+	dbPath string
 }
 
-// SyncNow 按需创建 embedded replica connector，执行同步，然后关闭 connector 重开本地连接。
-// 纯本地模式下为 no-op。
-func (s *Store) SyncNow() (libsql.Replicated, error) {
-	if s.syncCfg == nil {
-		return libsql.Replicated{}, nil
-	}
-
-	// 关闭本地连接，释放文件锁
-	s.DB.Close()
-
-	// 创建临时 embedded replica connector
-	connector, err := libsql.NewEmbeddedReplicaConnector(s.dbPath, s.syncCfg.PrimaryURL,
-		libsql.WithAuthToken(s.syncCfg.AuthToken),
-		libsql.WithReadYourWrites(true),
-	)
-	if err != nil {
-		// 失败时重开本地连接
-		s.ReopenLocal()
-		return libsql.Replicated{}, fmt.Errorf("failed to create sync connector: %w", err)
-	}
-
-	rep, syncErr := connector.Sync()
-	connector.Close()
-
-	// 重开本地连接
-	if err := s.ReopenLocal(); err != nil {
-		return rep, fmt.Errorf("failed to reopen database after sync: %w", err)
-	}
-
-	return rep, syncErr
-}
-
-// SyncBackground 后台同步：不关闭主 DB 连接，单独创建 connector 同步本地文件。
-// 适用于启动时后台 goroutine，TUI 不中断。
-func (s *Store) SyncBackground() error {
-	if s.syncCfg == nil {
-		return nil
-	}
-
-	connector, err := libsql.NewEmbeddedReplicaConnector(s.dbPath, s.syncCfg.PrimaryURL,
-		libsql.WithAuthToken(s.syncCfg.AuthToken),
-		libsql.WithReadYourWrites(true),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create sync connector: %w", err)
-	}
-	defer connector.Close()
-
-	_, err = connector.Sync()
-	return err
-}
-
-// Sync 手动触发同步。仅在有 live connector 时使用（OpenStoreWithConnector）。
-// 一般场景应使用 SyncNow()。
-func (s *Store) Sync() (libsql.Replicated, error) {
-	if s.Connector == nil {
-		return libsql.Replicated{}, nil
-	}
-	return s.Connector.Sync()
-}
-
-// Close 关闭数据库和 connector。
+// Close 关闭数据库连接。
 func (s *Store) Close() error {
-	if err := s.DB.Close(); err != nil {
-		return err
-	}
-	if s.Connector != nil {
-		return s.Connector.Close()
-	}
-	return nil
+	return s.DB.Close()
 }
 
-// IsSynced 返回是否启用了云端同步。
-func (s *Store) IsSynced() bool {
-	return s.syncCfg != nil
-}
-
-// SyncOpts 定义 Turso 云端同步选项。nil 表示纯本地模式。
-type SyncOpts struct {
-	PrimaryURL string // libsql://xxx.turso.io
-	AuthToken  string
-}
-
-// OpenStore 打开数据库（始终纯本地模式，快速启动）。
-// syncOpts 仅保存配置供 SyncNow() 使用，不会在启动时联网。
-func OpenStore(dbPath string, syncOpts *SyncOpts) (*Store, error) {
+// OpenStore 打开本地 SQLite 数据库。
+func OpenStore(dbPath string) (*Store, error) {
 	store := &Store{dbPath: dbPath}
-	if syncOpts != nil && syncOpts.PrimaryURL != "" {
-		store.syncCfg = syncOpts
-	}
-
 	if err := store.openLocal(); err != nil {
 		return nil, err
 	}
-
 	if err := store.initDB(); err != nil {
 		store.Close()
 		return nil, err
 	}
-
-	return store, nil
-}
-
-// OpenStoreWithConnector 用 embedded replica 打开数据库（会联网）。
-// 仅用于 sync setup 等需要 live connector 的场景。
-func OpenStoreWithConnector(dbPath string, syncOpts *SyncOpts) (*Store, error) {
-	store := &Store{dbPath: dbPath}
-
-	opts := []libsql.Option{
-		libsql.WithAuthToken(syncOpts.AuthToken),
-		libsql.WithReadYourWrites(true),
-	}
-	connector, err := libsql.NewEmbeddedReplicaConnector(dbPath, syncOpts.PrimaryURL, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create sync connector: %w", err)
-	}
-	store.Connector = connector
-	store.DB = sql.OpenDB(connector)
-
-	if err := store.initDB(); err != nil {
-		store.Close()
-		return nil, err
-	}
-
 	return store, nil
 }
 
 // openLocal 以纯本地模式打开 DB。
 func (s *Store) openLocal() error {
-	database, err := sql.Open("libsql", "file:"+s.dbPath)
+	database, err := sql.Open("sqlite", "file:"+s.dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -316,6 +210,54 @@ CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks BEGIN
 END;
 `
 
+// migrationV3 为已有数据库添加 soft delete 支持。
+// bookmarks 表和 bookmark_tags 表新增 deleted_at 列用于 tombstone 标记。
+// bookmark_tags 新增 updated_at 列用于冲突解决。
+// FTS5 触发器更新为忽略已删除的记录。
+const migrationV3 = `
+-- bookmarks: 添加 soft delete 列
+ALTER TABLE bookmarks ADD COLUMN deleted_at TEXT DEFAULT NULL;
+
+-- bookmark_tags: 添加时间戳和 soft delete 列
+-- SQLite ALTER TABLE ADD COLUMN 不支持非常量默认值，先用 NULL 再回填
+ALTER TABLE bookmark_tags ADD COLUMN updated_at TEXT DEFAULT NULL;
+ALTER TABLE bookmark_tags ADD COLUMN deleted_at TEXT DEFAULT NULL;
+
+-- 为已有 bookmark_tags 行填充 updated_at（用对应 bookmark 的 created_at）
+UPDATE bookmark_tags
+SET updated_at = COALESCE(
+    (SELECT created_at FROM bookmarks WHERE id = bookmark_tags.bookmark_id),
+    strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+)
+WHERE updated_at IS NULL;
+
+-- 重建 FTS5 触发器：soft delete 时从 FTS 索引中移除
+DROP TRIGGER IF EXISTS bookmarks_ai;
+DROP TRIGGER IF EXISTS bookmarks_ad;
+DROP TRIGGER IF EXISTS bookmarks_au;
+
+CREATE TRIGGER bookmarks_ai AFTER INSERT ON bookmarks
+WHEN new.deleted_at IS NULL
+BEGIN
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
+END;
+
+CREATE TRIGGER bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
+END;
+
+CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    SELECT 'delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text
+    WHERE old.deleted_at IS NULL;
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    SELECT new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text
+    WHERE new.deleted_at IS NULL;
+END;
+`
+
 // migrate 检查数据库并执行必要的 migration。
 // 使用表/列存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
 // migrationV1 的所有语句都用 IF NOT EXISTS，天然幂等。
@@ -335,6 +277,13 @@ func migrate(db *sql.DB) error {
 	if !columnExists(db, "bookmarks", "ai_note") {
 		if err := execStatements(db, migrationV2); err != nil {
 			return fmt.Errorf("migration v2 failed: %w", err)
+		}
+	}
+
+	// V3: soft delete 支持（bookmarks.deleted_at, bookmark_tags.updated_at/deleted_at）
+	if !columnExists(db, "bookmarks", "deleted_at") {
+		if err := execStatements(db, migrationV3); err != nil {
+			return fmt.Errorf("migration v3 failed: %w", err)
 		}
 	}
 
@@ -366,7 +315,7 @@ func columnExists(db *sql.DB, table, column string) bool {
 }
 
 // execStatements 将多条 SQL 语句逐条执行。
-// go-libsql 不支持一次 Exec 多条语句，所以需要拆分。
+// SQLite driver 不支持一次 Exec 多条语句，所以需要拆分。
 // 使用简单的分号分割（适合我们的建表 SQL，不含存储过程等复杂场景）。
 func execStatements(db *sql.DB, sqlBlock string) error {
 	// 先按 ";\n" 分割，保留触发器中的分号（触发器内的分号后面没有换行在行首）

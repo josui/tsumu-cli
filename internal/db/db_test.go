@@ -11,7 +11,7 @@ import (
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := OpenStore(dbPath, nil)
+	store, err := OpenStore(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore failed: %v", err)
 	}
@@ -56,14 +56,14 @@ func TestOpen_IdempotentMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	// 第一次打开
-	s1, err := OpenStore(dbPath, nil)
+	s1, err := OpenStore(dbPath)
 	if err != nil {
 		t.Fatalf("first OpenStore failed: %v", err)
 	}
 	s1.Close()
 
 	// 第二次打开（migration 应幂等）
-	s2, err := OpenStore(dbPath, nil)
+	s2, err := OpenStore(dbPath)
 	if err != nil {
 		t.Fatalf("second OpenStore failed: %v", err)
 	}

@@ -5,13 +5,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/josui/tsumu-cli/cmd"
 	"github.com/josui/tsumu-cli/config"
 	"github.com/josui/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/internal/sync"
 )
 
 func main() {
@@ -39,7 +40,7 @@ func main() {
 		wantSync := cmd.RunOnboarding()
 		if wantSync {
 			// 先打开本地 DB（sync setup 需要），然后走 sync setup 流程
-			store, err := db.OpenStore(cfg.DBPath(), nil)
+			store, err := db.OpenStore(cfg.DBPath())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
 				os.Exit(1)
@@ -59,34 +60,30 @@ func main() {
 		}
 	}
 
-	// 2. 打开数据库（始终本地模式，快速启动）
-	var syncOpts *db.SyncOpts
-	if cfg.Sync.IsEnabled() && cfg.Sync.GetURL() != "" {
-		syncOpts = &db.SyncOpts{
-			PrimaryURL: cfg.Sync.GetURL(),
-			AuthToken:  cfg.Sync.GetAuthToken(),
-		}
-	}
-
-	store, err := db.OpenStore(cfg.DBPath(), syncOpts)
+	// 2. 打开数据库（本地模式）
+	store, err := db.OpenStore(cfg.DBPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
-	// 3. 懒同步：启动时检查 interval，需要时后台同步（不阻塞 TUI）
-	if store.IsSynced() && cfg.Sync.NeedsSync() {
-		go func() {
-			if err := store.SyncBackground(); err != nil {
-				return
-			}
-			cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
-			cfg.Save()
-		}()
+	// 2.5 Lazy sync：启用同步且距上次同步超过 interval 时，自动拉取/推送变更。
+	// 静默执行，失败不阻塞正常使用（仅输出警告）。
+	if cfg.Sync.IsEnabled() && cfg.Sync.NeedsSync() {
+		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
+		result := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, nil)
+		cfg.Sync.LastSynced = sync.NowUTC()
+		cfg.Save()
+
+		pulled := result.PulledNew + result.PulledUpdated
+		pushed := result.PushedNew + result.PushedUpdated
+		if pulled > 0 || pushed > 0 {
+			fmt.Printf("  ⟳ Auto-synced: pulled %d, pushed %d\n", pulled, pushed)
+		}
 	}
 
-	// 4. 注入 Store 到 cmd 包，然后执行命令
+	// 3. 注入 Store 到 cmd 包，然后执行命令
 	cmd.Store = store
 	cmd.Cfg = cfg
 	cmd.Execute()

@@ -24,6 +24,7 @@ func containsCJK(s string) bool {
 }
 
 // searchSQL 是 FTS5 搜索查询（含 tags）。
+// 过滤已 soft delete 的书签和标签关联。
 const searchSQL = `
 SELECT b.id, b.url, b.title, b.site_name,
        b.click_count, b.is_favorite, b.note, b.description,
@@ -31,30 +32,34 @@ SELECT b.id, b.url, b.title, b.site_name,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks_fts fts
 JOIN bookmarks b ON b.rowid = fts.rowid
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
-WHERE bookmarks_fts MATCH ?
+WHERE bookmarks_fts MATCH ? AND b.deleted_at IS NULL
 GROUP BY b.id
 ORDER BY rank
 LIMIT ? OFFSET ?
 `
 
 // countSQL 统计搜索结果总数（用于分页）。
+// JOIN bookmarks 表以过滤已 soft delete 的记录。
 const countSQL = `
 SELECT COUNT(*)
-FROM bookmarks_fts
-WHERE bookmarks_fts MATCH ?
+FROM bookmarks_fts fts
+JOIN bookmarks b ON b.rowid = fts.rowid
+WHERE bookmarks_fts MATCH ? AND b.deleted_at IS NULL
 `
 
 // listSQL 列出全部书签（含 tags），按创建时间倒序。
+// 过滤已 soft delete 的书签和标签关联。
 const listSQL = `
 SELECT b.id, b.url, b.title, b.site_name,
        b.click_count, b.is_favorite, b.note, b.description,
        b.source, b.created_at,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks b
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
+WHERE b.deleted_at IS NULL
 GROUP BY b.id
 ORDER BY b.created_at DESC
 LIMIT ? OFFSET ?
@@ -70,8 +75,8 @@ func Search(db *sql.DB, query string, limit, offset int, since string, favOnly b
 	var err error
 
 	if query == "" {
-		// 无搜索词：列出全部
-		var wheres []string
+		// 无搜索词：列出全部（始终过滤已 soft delete 的记录）
+		wheres := []string{"b.deleted_at IS NULL"}
 		var args []any
 		if since != "" {
 			wheres = append(wheres, "b.created_at >= ?")
@@ -81,14 +86,11 @@ func Search(db *sql.DB, query string, limit, offset int, since string, favOnly b
 			wheres = append(wheres, "b.is_favorite = 1")
 		}
 		if tag != "" {
-			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ? AND bt.deleted_at IS NULL)")
 			args = append(args, tag)
 		}
 
-		whereClause := ""
-		if len(wheres) > 0 {
-			whereClause = "WHERE " + strings.Join(wheres, " AND ")
-		}
+		whereClause := "WHERE " + strings.Join(wheres, " AND ")
 
 		// Count query
 		countQ := "SELECT COUNT(*) FROM bookmarks b " + whereClause
@@ -97,14 +99,15 @@ func Search(db *sql.DB, query string, limit, offset int, since string, favOnly b
 		}
 
 		var querySQL string
-		if whereClause != "" {
+		if len(wheres) > 1 {
+			// 有额外筛选条件时使用动态 SQL
 			querySQL = fmt.Sprintf(`
 SELECT b.id, b.url, b.title, b.site_name,
        b.click_count, b.is_favorite, b.note, b.description,
        b.source, b.created_at,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks b
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
 %s
 GROUP BY b.id
@@ -124,6 +127,8 @@ LIMIT ? OFFSET ?`, whereClause)
 		var wheres []string
 		var args []any
 
+		// 始终过滤已 soft delete 的记录
+		wheres = append(wheres, "b.deleted_at IS NULL")
 		wheres = append(wheres, "(b.title LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.ai_note LIKE ? OR b.site_name LIKE ? OR b.tags_text LIKE ?)")
 		args = append(args, likePattern, likePattern, likePattern, likePattern, likePattern, likePattern)
 
@@ -135,7 +140,7 @@ LIMIT ? OFFSET ?`, whereClause)
 			wheres = append(wheres, "b.is_favorite = 1")
 		}
 		if tag != "" {
-			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+			wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ? AND bt.deleted_at IS NULL)")
 			args = append(args, tag)
 		}
 
@@ -152,7 +157,7 @@ SELECT b.id, b.url, b.title, b.site_name,
        b.source, b.created_at,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks b
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
 %s
 GROUP BY b.id
@@ -162,7 +167,7 @@ LIMIT ? OFFSET ?`, whereClause)
 		queryArgs := append(args, limit, offset)
 		rows, err = db.Query(querySQL, queryArgs...)
 	} else {
-		// FTS5 全文搜索
+		// FTS5 全文搜索（始终过滤已 soft delete 的记录）
 		var extraConds string
 		var extraArgs []any
 		if since != "" {
@@ -173,7 +178,7 @@ LIMIT ? OFFSET ?`, whereClause)
 			extraConds += " AND b.is_favorite = 1"
 		}
 		if tag != "" {
-			extraConds += " AND b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)"
+			extraConds += " AND b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ? AND bt.deleted_at IS NULL)"
 			extraArgs = append(extraArgs, tag)
 		}
 
@@ -183,7 +188,7 @@ LIMIT ? OFFSET ?`, whereClause)
 SELECT COUNT(*)
 FROM bookmarks_fts fts
 JOIN bookmarks b ON b.rowid = fts.rowid
-WHERE bookmarks_fts MATCH ?%s`, extraConds)
+WHERE bookmarks_fts MATCH ? AND b.deleted_at IS NULL%s`, extraConds)
 			countArgs := append([]any{query}, extraArgs...)
 			if err := db.QueryRow(countQ, countArgs...).Scan(&total); err != nil {
 				return nil, 0, fmt.Errorf("count query failed: %w", err)
@@ -203,9 +208,9 @@ SELECT b.id, b.url, b.title, b.site_name,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks_fts fts
 JOIN bookmarks b ON b.rowid = fts.rowid
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
-WHERE bookmarks_fts MATCH ?%s
+WHERE bookmarks_fts MATCH ? AND b.deleted_at IS NULL%s
 GROUP BY b.id
 ORDER BY rank
 LIMIT ? OFFSET ?`, extraConds)
@@ -242,8 +247,10 @@ LIMIT ? OFFSET ?`, extraConds)
 }
 
 // RandomBookmark 返回符合筛选条件的随机书签。无匹配时返回 nil。
+// 始终过滤已 soft delete 的记录。
 func RandomBookmark(database *sql.DB, since string, favOnly bool, tag string) (*Bookmark, error) {
-	var wheres []string
+	// 始终过滤已 soft delete 的记录
+	wheres := []string{"b.deleted_at IS NULL"}
 	var args []any
 	if since != "" {
 		wheres = append(wheres, "b.created_at >= ?")
@@ -253,14 +260,11 @@ func RandomBookmark(database *sql.DB, since string, favOnly bool, tag string) (*
 		wheres = append(wheres, "b.is_favorite = 1")
 	}
 	if tag != "" {
-		wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ?)")
+		wheres = append(wheres, "b.id IN (SELECT bt.bookmark_id FROM bookmark_tags bt JOIN tags t ON bt.tag_id = t.id WHERE t.name = ? AND bt.deleted_at IS NULL)")
 		args = append(args, tag)
 	}
 
-	whereClause := ""
-	if len(wheres) > 0 {
-		whereClause = "WHERE " + strings.Join(wheres, " AND ")
-	}
+	whereClause := "WHERE " + strings.Join(wheres, " AND ")
 
 	q := fmt.Sprintf(`
 SELECT b.id, b.url, b.title, b.site_name,
@@ -268,7 +272,7 @@ SELECT b.id, b.url, b.title, b.site_name,
        b.source, b.created_at,
        COALESCE(GROUP_CONCAT(t.name, ', '), '') AS tags
 FROM bookmarks b
-LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id
+LEFT JOIN bookmark_tags bt ON b.id = bt.bookmark_id AND bt.deleted_at IS NULL
 LEFT JOIN tags t ON bt.tag_id = t.id
 %s
 GROUP BY b.id

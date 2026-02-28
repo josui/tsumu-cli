@@ -40,9 +40,9 @@ func newULID() string {
 
 // CreateBookmark 创建或更新书签（URL 相同时覆盖 metadata/note），返回 Bookmark。
 func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) (*Bookmark, error) {
-	// 先查是否已存在
+	// 先查是否已存在（排除已 soft delete 的记录）
 	var existingID string
-	err := db.QueryRow(`SELECT id FROM bookmarks WHERE url = ?`, url).Scan(&existingID)
+	err := db.QueryRow(`SELECT id FROM bookmarks WHERE url = ? AND deleted_at IS NULL`, url).Scan(&existingID)
 	if err == nil {
 		// 已存在，更新 metadata 并刷新时间（排到最上面）。
 		// note 只在传入非空时覆盖，避免重复 add 时清掉已有 note。
@@ -90,7 +90,7 @@ func GetBookmarkByID(db *sql.DB, id string) (*Bookmark, error) {
 	err := db.QueryRow(
 		`SELECT id, url, title, description, note, site_name, tags_text,
 		        click_count, is_favorite, source, created_at, updated_at
-		 FROM bookmarks WHERE id = ?`, id,
+		 FROM bookmarks WHERE id = ? AND deleted_at IS NULL`, id,
 	).Scan(
 		&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note,
 		&bm.SiteName, &bm.TagsText, &bm.ClickCount, &bm.IsFavorite,
@@ -108,7 +108,7 @@ func GetBookmarkByID(db *sql.DB, id string) (*Bookmark, error) {
 
 // IncrementClickCount 将书签的点击次数 +1，返回更新后的次数。
 func IncrementClickCount(db *sql.DB, id string) (int, error) {
-	// 注意：go-libsql 不支持 RETURNING 子句，所以先 UPDATE 再 SELECT。
+	// 注意：SQLite driver 不支持 RETURNING 子句，所以先 UPDATE 再 SELECT。
 	_, err := db.Exec(
 		`UPDATE bookmarks
 		 SET click_count = click_count + 1,
@@ -172,7 +172,7 @@ func UpdateNote(db *sql.DB, id string, note string) error {
 // CountEmptyAiNote 统计 ai_note 为空的书签数（用于提示用户运行 tsumu ai）。
 func CountEmptyAiNote(db *sql.DB) (int, error) {
 	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE ai_note = '' OR ai_note IS NULL`).Scan(&count)
+	err := db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE (ai_note = '' OR ai_note IS NULL) AND deleted_at IS NULL`).Scan(&count)
 	return count, err
 }
 
@@ -189,9 +189,9 @@ type BookmarkBrief struct {
 // ListBookmarksForAI 返回需要 AI 增强的书签列表。
 // emptyAiNoteOnly=true 时只返回 ai_note 为空的，false 返回全部（用于标签补充）。
 func ListBookmarksForAI(db *sql.DB, emptyAiNoteOnly bool) ([]BookmarkBrief, error) {
-	query := `SELECT id, url, title, description, ai_note, site_name FROM bookmarks`
+	query := `SELECT id, url, title, description, ai_note, site_name FROM bookmarks WHERE deleted_at IS NULL`
 	if emptyAiNoteOnly {
-		query += ` WHERE ai_note = '' OR ai_note IS NULL`
+		query += ` AND (ai_note = '' OR ai_note IS NULL)`
 	}
 	query += ` ORDER BY created_at DESC`
 
@@ -226,9 +226,23 @@ func UpdateAiNote(db *sql.DB, id string, aiNote string) error {
 	return nil
 }
 
-// DeleteBookmark 删除指定书签。bookmark_tags 通过 ON DELETE CASCADE 自动清理。
+// DeleteBookmark soft delete 指定书签及其关联的 bookmark_tags。
+// 通过设置 deleted_at 时间戳标记为已删除，不物理删除数据。
 func DeleteBookmark(db *sql.DB, id string) error {
-	result, err := db.Exec(`DELETE FROM bookmarks WHERE id = ?`, id)
+	// 先 soft delete 关联的 bookmark_tags
+	_, err := db.Exec(
+		`UPDATE bookmark_tags SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+		                          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE bookmark_id = ? AND deleted_at IS NULL`, id)
+	if err != nil {
+		return fmt.Errorf("soft delete bookmark_tags: %w", err)
+	}
+
+	// soft delete 书签本身
+	result, err := db.Exec(
+		`UPDATE bookmarks SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+		                      updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE id = ? AND deleted_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("delete bookmark failed: %w", err)
 	}
