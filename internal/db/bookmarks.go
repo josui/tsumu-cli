@@ -44,15 +44,27 @@ func CreateBookmark(db *sql.DB, url, title, description, siteName, note string) 
 	var existingID string
 	err := db.QueryRow(`SELECT id FROM bookmarks WHERE url = ?`, url).Scan(&existingID)
 	if err == nil {
-		// 已存在，更新 metadata/note 并刷新时间（排到最上面）
-		_, err := db.Exec(
-			`UPDATE bookmarks
-			 SET title = ?, description = ?, site_name = ?, note = ?,
-			     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-			     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-			 WHERE id = ?`,
-			title, description, siteName, note, existingID,
-		)
+		// 已存在，更新 metadata 并刷新时间（排到最上面）。
+		// note 只在传入非空时覆盖，避免重复 add 时清掉已有 note。
+		if note != "" {
+			_, err = db.Exec(
+				`UPDATE bookmarks
+				 SET title = ?, description = ?, site_name = ?, note = ?,
+				     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+				     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				 WHERE id = ?`,
+				title, description, siteName, note, existingID,
+			)
+		} else {
+			_, err = db.Exec(
+				`UPDATE bookmarks
+				 SET title = ?, description = ?, site_name = ?,
+				     created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+				     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				 WHERE id = ?`,
+				title, description, siteName, existingID,
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("update bookmark failed: %w", err)
 		}
@@ -153,6 +165,63 @@ func UpdateNote(db *sql.DB, id string, note string) error {
 	}
 	if affected == 0 {
 		return fmt.Errorf("bookmark not found: %s", id)
+	}
+	return nil
+}
+
+// CountEmptyAiNote 统计 ai_note 为空的书签数（用于提示用户运行 tsumu ai）。
+func CountEmptyAiNote(db *sql.DB) (int, error) {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE ai_note = '' OR ai_note IS NULL`).Scan(&count)
+	return count, err
+}
+
+// BookmarkBrief 是 AI 批量处理用的精简书签结构。
+type BookmarkBrief struct {
+	ID          string
+	URL         string
+	Title       string
+	Description string // 网页 OGP description
+	AiNote      string // AI 生成的摘要
+	SiteName    string
+}
+
+// ListBookmarksForAI 返回需要 AI 增强的书签列表。
+// emptyAiNoteOnly=true 时只返回 ai_note 为空的，false 返回全部（用于标签补充）。
+func ListBookmarksForAI(db *sql.DB, emptyAiNoteOnly bool) ([]BookmarkBrief, error) {
+	query := `SELECT id, url, title, description, ai_note, site_name FROM bookmarks`
+	if emptyAiNoteOnly {
+		query += ` WHERE ai_note = '' OR ai_note IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks for AI failed: %w", err)
+	}
+	defer rows.Close()
+
+	var results []BookmarkBrief
+	for rows.Next() {
+		var bm BookmarkBrief
+		if err := rows.Scan(&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.AiNote, &bm.SiteName); err != nil {
+			return nil, fmt.Errorf("scan bookmark failed: %w", err)
+		}
+		results = append(results, bm)
+	}
+	return results, rows.Err()
+}
+
+// UpdateAiNote 更新书签的 ai_note 字段（AI 生成的摘要，用于检索辅助）。
+func UpdateAiNote(db *sql.DB, id string, aiNote string) error {
+	_, err := db.Exec(
+		`UPDATE bookmarks
+		 SET ai_note = ?,
+		     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE id = ?`, aiNote, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update ai_note failed: %w", err)
 	}
 	return nil
 }

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     title       TEXT NOT NULL DEFAULT '',
     description TEXT DEFAULT '',
     note        TEXT DEFAULT '',                                           -- 用户备注
+    ai_note     TEXT DEFAULT '',                                           -- AI 生成的摘要（检索辅助，不显示）
     site_name   TEXT DEFAULT '',
     tags_text   TEXT DEFAULT '',                                           -- 冗余字段，逗号分隔
     click_count INTEGER NOT NULL DEFAULT 0,
@@ -61,13 +62,14 @@ CREATE INDEX IF NOT EXISTS idx_bt_tag ON bookmark_tags(tag_id);
 
 -- ============================================================
 -- bookmarks_fts: FTS5 全文搜索虚拟表
--- 索引 5 个字段：title / description / note / site_name / tags_text
+-- 索引 6 个字段：title / description / note / ai_note / site_name / tags_text
 -- content='bookmarks' 表示数据来源是 bookmarks 表（content-sync 模式）
 -- ============================================================
 CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
     title,
     description,
     note,
+    ai_note,
     site_name,
     tags_text,
     content='bookmarks',
@@ -76,20 +78,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS bookmarks_fts USING fts5(
 
 -- FTS5 同步触发器：bookmarks 表增删改时自动同步到 FTS 索引
 CREATE TRIGGER IF NOT EXISTS bookmarks_ai AFTER INSERT ON bookmarks BEGIN
-    INSERT INTO bookmarks_fts(rowid, title, description, note, site_name, tags_text)
-    VALUES (new.rowid, new.title, new.description, new.note, new.site_name, new.tags_text);
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
 END;
 
 CREATE TRIGGER IF NOT EXISTS bookmarks_ad AFTER DELETE ON bookmarks BEGIN
-    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, site_name, tags_text)
-    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.site_name, old.tags_text);
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
 END;
 
 CREATE TRIGGER IF NOT EXISTS bookmarks_au AFTER UPDATE ON bookmarks BEGIN
-    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, site_name, tags_text)
-    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.site_name, old.tags_text);
-    INSERT INTO bookmarks_fts(rowid, title, description, note, site_name, tags_text)
-    VALUES (new.rowid, new.title, new.description, new.note, new.site_name, new.tags_text);
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
 END;
 
 `
@@ -121,7 +123,7 @@ func (s *Store) SyncNow() (libsql.Replicated, error) {
 	)
 	if err != nil {
 		// 失败时重开本地连接
-		s.reopenLocal()
+		s.ReopenLocal()
 		return libsql.Replicated{}, fmt.Errorf("failed to create sync connector: %w", err)
 	}
 
@@ -129,7 +131,7 @@ func (s *Store) SyncNow() (libsql.Replicated, error) {
 	connector.Close()
 
 	// 重开本地连接
-	if err := s.reopenLocal(); err != nil {
+	if err := s.ReopenLocal(); err != nil {
 		return rep, fmt.Errorf("failed to reopen database after sync: %w", err)
 	}
 
@@ -241,8 +243,8 @@ func (s *Store) openLocal() error {
 	return nil
 }
 
-// reopenLocal 关闭后重新以本地模式打开并初始化 PRAGMA。
-func (s *Store) reopenLocal() error {
+// ReopenLocal 关闭后重新以本地模式打开并初始化 PRAGMA。
+func (s *Store) ReopenLocal() error {
 	if err := s.openLocal(); err != nil {
 		return err
 	}
@@ -274,26 +276,93 @@ func (s *Store) initDB() error {
 	return nil
 }
 
+// migrationV2 为已有数据库添加 ai_note 列并重建 FTS5 索引。
+// 新建库不需要这段（v1 已包含 ai_note），仅用于升级旧库。
+const migrationV2 = `
+-- 添加 ai_note 列（AI 生成的摘要，用于检索辅助）
+ALTER TABLE bookmarks ADD COLUMN ai_note TEXT DEFAULT '';
+
+-- 重建 FTS5 虚拟表（列变更无法 ALTER，必须 drop + recreate）
+DROP TRIGGER IF EXISTS bookmarks_ai;
+DROP TRIGGER IF EXISTS bookmarks_ad;
+DROP TRIGGER IF EXISTS bookmarks_au;
+DROP TABLE IF EXISTS bookmarks_fts;
+
+CREATE VIRTUAL TABLE bookmarks_fts USING fts5(
+    title, description, note, ai_note, site_name, tags_text,
+    content='bookmarks', content_rowid='rowid'
+);
+
+-- 将已有数据灌入新 FTS 索引
+INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+SELECT rowid, title, description, note, ai_note, site_name, tags_text FROM bookmarks;
+
+-- 重建触发器
+CREATE TRIGGER bookmarks_ai AFTER INSERT ON bookmarks BEGIN
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
+END;
+
+CREATE TRIGGER bookmarks_ad AFTER DELETE ON bookmarks BEGIN
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
+END;
+
+CREATE TRIGGER bookmarks_au AFTER UPDATE ON bookmarks BEGIN
+    INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES ('delete', old.rowid, old.title, old.description, old.note, old.ai_note, old.site_name, old.tags_text);
+    INSERT INTO bookmarks_fts(rowid, title, description, note, ai_note, site_name, tags_text)
+    VALUES (new.rowid, new.title, new.description, new.note, new.ai_note, new.site_name, new.tags_text);
+END;
+`
+
 // migrate 检查数据库并执行必要的 migration。
-// 使用表存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
+// 使用表/列存在性检测（兼容 Turso，PRAGMA user_version 在 Turso 不可写）。
 // migrationV1 的所有语句都用 IF NOT EXISTS，天然幂等。
 func migrate(db *sql.DB) error {
-	// 检查 bookmarks 表是否存在，存在则跳过
+	// 检查 bookmarks 表是否存在
 	var tableName string
 	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'`).Scan(&tableName)
-	if err == nil {
-		// 表已存在，migration 已执行过
+	if err != nil {
+		// 表不存在，执行完整 v1 migration（已包含 ai_note）
+		if err := execStatements(db, migrationV1); err != nil {
+			return fmt.Errorf("migration v1 failed: %w", err)
+		}
 		return nil
 	}
 
-	// 执行 v1 migration（建表 + FTS5 + 触发器）
-	// go-libsql 的 Exec 只执行多语句中的第一条，所以需要逐条执行。
-	// 按分号拆分 SQL，跳过空语句和注释。
-	if err := execStatements(db, migrationV1); err != nil {
-		return fmt.Errorf("migration v1 failed: %w", err)
+	// 表已存在，检查是否需要 v2 升级（ai_note 列）
+	if !columnExists(db, "bookmarks", "ai_note") {
+		if err := execStatements(db, migrationV2); err != nil {
+			return fmt.Errorf("migration v2 failed: %w", err)
+		}
 	}
 
 	return nil
+}
+
+// columnExists 检查表中是否存在指定列。
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // execStatements 将多条 SQL 语句逐条执行。

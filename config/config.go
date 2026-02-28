@@ -52,6 +52,30 @@ type SyncConfig struct {
 	LastSynced string `toml:"last_synced,omitempty"`
 }
 
+// GetURL 返回 Turso sync URL。优先级：环境变量 TSUMU_SYNC_URL > config.toml。
+func (s *SyncConfig) GetURL() string {
+	if v := os.Getenv("TSUMU_SYNC_URL"); v != "" {
+		return v
+	}
+	return s.URL
+}
+
+// GetAuthToken 返回 Turso auth token。优先级：环境变量 TSUMU_SYNC_AUTH_TOKEN > config.toml。
+func (s *SyncConfig) GetAuthToken() string {
+	if v := os.Getenv("TSUMU_SYNC_AUTH_TOKEN"); v != "" {
+		return v
+	}
+	return s.AuthToken
+}
+
+// IsEnabled 判断 sync 是否启用。环境变量有 URL 时自动视为 enabled。
+func (s *SyncConfig) IsEnabled() bool {
+	if os.Getenv("TSUMU_SYNC_URL") != "" {
+		return true
+	}
+	return s.Enabled
+}
+
 // ParseInterval 将 interval 字符串（例如 "24h", "7d"）解析为 time.Duration。
 // 空字符串或无法解析时返回默认值 24h。
 func (s *SyncConfig) ParseInterval() time.Duration {
@@ -80,7 +104,7 @@ func (s *SyncConfig) ParseInterval() time.Duration {
 
 // NeedsSync 判断是否需要同步：enabled 且（从未同步 或 距上次同步已超过 interval）。
 func (s *SyncConfig) NeedsSync() bool {
-	if !s.Enabled {
+	if !s.IsEnabled() {
 		return false
 	}
 	if s.LastSynced == "" {
@@ -93,17 +117,39 @@ func (s *SyncConfig) NeedsSync() bool {
 	return time.Since(last) >= s.ParseInterval()
 }
 
-// AIConfig 是 AI embedding 配置。
+// AIConfig 是 AI 配置。
+// Provider + APIKey 用于所有 AI 功能；GenModel 用于 text generation，Model/Dimension 预留给 embedding。
 type AIConfig struct {
-	Provider  string `toml:"provider"`            // "gemini" | "ollama"
-	APIKey    string `toml:"api_key"`              // gemini requires API key
-	Model     string `toml:"model,omitempty"`      // ollama model name, default "nomic-embed-text"
-	Dimension int    `toml:"dimension,omitempty"`   // embedding dimension, default 768
+	Provider  string `toml:"provider"`             // "gemini" | "ollama"
+	APIKey    string `toml:"api_key"`               // gemini 需要 API key
+	GenModel  string `toml:"gen_model,omitempty"`    // text generation 模型，默认 "gemini-3-flash"
+	Model     string `toml:"model,omitempty"`        // embedding 模型名（预留）
+	Dimension int    `toml:"dimension,omitempty"`    // embedding 维度（预留）
 }
 
-// IsConfigured returns true if AI embedding is set up.
+// IsConfigured returns true if AI is set up.
+// 环境变量 TSUMU_AI_API_KEY 存在，或 config.toml 中有 provider + api_key。
 func (a *AIConfig) IsConfigured() bool {
-	return a.Provider != ""
+	return a.GetAPIKey() != ""
+}
+
+// GetProvider 返回 AI provider。有 API key 时默认 "gemini"。
+func (a *AIConfig) GetProvider() string {
+	if a.Provider != "" {
+		return a.Provider
+	}
+	if a.GetAPIKey() != "" {
+		return "gemini"
+	}
+	return ""
+}
+
+// GetAPIKey 返回 API key。优先级：环境变量 TSUMU_AI_API_KEY > config.toml。
+func (a *AIConfig) GetAPIKey() string {
+	if v := os.Getenv("TSUMU_AI_API_KEY"); v != "" {
+		return v
+	}
+	return a.APIKey
 }
 
 // GetDimension returns the configured dimension, defaulting to 768.
@@ -112,6 +158,18 @@ func (a *AIConfig) GetDimension() int {
 		return 768
 	}
 	return a.Dimension
+}
+
+// GetGenModel 返回 text generation 模型名。
+// 优先级：环境变量 TSUMU_AI_GEN_MODEL > config.toml > 默认值 gemini-flash-latest。
+func (a *AIConfig) GetGenModel() string {
+	if v := os.Getenv("TSUMU_AI_GEN_MODEL"); v != "" {
+		return v
+	}
+	if a.GenModel != "" {
+		return a.GenModel
+	}
+	return "gemini-flash-latest"
 }
 
 // GetModel returns the configured model name with provider-specific defaults.
@@ -250,17 +308,23 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# ============================================================\n")
 	fmt.Fprintf(w, "# Setup: tsumu sync --setup\n")
 	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "# 也可用环境变量配置（推荐，避免 token 明文存储）:\n")
+	fmt.Fprintf(w, "#   export TSUMU_SYNC_URL=\"libsql://your-db.turso.io\"\n")
+	fmt.Fprintf(w, "#   export TSUMU_SYNC_AUTH_TOKEN=\"your-token\"\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "# 优先级: 环境变量 > config.toml\n")
+	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[sync]\n")
 	fmt.Fprintf(w, "enabled = %t\n", c.Sync.Enabled)
 	if c.Sync.URL != "" {
 		fmt.Fprintf(w, "url = %q\n", c.Sync.URL)
 	} else {
-		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"\n")
+		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"  # 推荐用 TSUMU_SYNC_URL 环境变量代替\n")
 	}
 	if c.Sync.AuthToken != "" {
 		fmt.Fprintf(w, "auth_token = %q\n", c.Sync.AuthToken)
 	} else {
-		fmt.Fprintf(w, "# auth_token = \"your-token\"\n")
+		fmt.Fprintf(w, "# auth_token = \"your-token\"  # 推荐用 TSUMU_SYNC_AUTH_TOKEN 环境变量代替\n")
 	}
 	if c.Sync.Interval != "" {
 		fmt.Fprintf(w, "interval = %q\n", c.Sync.Interval)
@@ -273,10 +337,16 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 
 	// ── ai ──
 	fmt.Fprintf(w, "\n# ============================================================\n")
-	fmt.Fprintf(w, "# AI semantic search (embedding)\n")
+	fmt.Fprintf(w, "# AI enhancement (description generation, tag suggestion, query expansion)\n")
 	fmt.Fprintf(w, "# ============================================================\n")
-	fmt.Fprintf(w, "# Providers: \"gemini\", \"ollama\"\n")
+	fmt.Fprintf(w, "# Provider: \"gemini\"\n")
 	fmt.Fprintf(w, "# Setup: tsumu config --ai\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "# 推荐使用环境变量配置 API key（避免明文存储在配置文件中）:\n")
+	fmt.Fprintf(w, "#   export TSUMU_AI_API_KEY=\"your-api-key\"\n")
+	fmt.Fprintf(w, "#   export TSUMU_AI_GEN_MODEL=\"gemini-flash-latest\"  # 可选，默认 gemini-flash-latest\n")
+	fmt.Fprintf(w, "#\n")
+	fmt.Fprintf(w, "# 优先级: 环境变量 > config.toml\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[ai]\n")
 	if c.AI.Provider != "" {
@@ -287,7 +357,12 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	if c.AI.APIKey != "" {
 		fmt.Fprintf(w, "api_key = %q\n", c.AI.APIKey)
 	} else {
-		fmt.Fprintf(w, "# api_key = \"your-api-key\"\n")
+		fmt.Fprintf(w, "# api_key = \"your-api-key\"  # 推荐用 TSUMU_AI_API_KEY 环境变量代替\n")
+	}
+	if c.AI.GenModel != "" {
+		fmt.Fprintf(w, "gen_model = %q\n", c.AI.GenModel)
+	} else {
+		fmt.Fprintf(w, "# gen_model = \"gemini-flash-latest\"\n")
 	}
 	if c.AI.Model != "" {
 		fmt.Fprintf(w, "model = %q\n", c.AI.Model)

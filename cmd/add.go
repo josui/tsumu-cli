@@ -5,12 +5,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	neturl "net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
 	"github.com/josui/tsumu-cli/internal/meta"
 )
@@ -50,7 +54,7 @@ func cleanURL(raw string) string {
 	return u.String()
 }
 
-// runAdd 执行添加书签流程：抓元数据 → 写数据库 → 打印结果。
+// runAdd 执行添加书签流程：抓元数据 → 写数据库 → AI 增强 → 打印结果。
 func runAdd(rawURL string, note string, tags string) error {
 	cleanedURL := cleanURL(rawURL)
 
@@ -95,14 +99,7 @@ func runAdd(rawURL string, note string, tags string) error {
 	if Cfg != nil && len(Cfg.DomainTags) > 0 {
 		domain := meta.ExtractDomain(rawURL)
 		if autoTag, ok := Cfg.DomainTags[domain]; ok && autoTag != "" {
-			found := false
-			for _, t := range tagList {
-				if t == autoTag {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !containsTag(tagList, autoTag) {
 				tagList = append(tagList, autoTag)
 			}
 		}
@@ -115,5 +112,53 @@ func runAdd(rawURL string, note string, tags string) error {
 		fmt.Printf("  ✓ Tagged: %s\n", strings.Join(tagList, ", "))
 	}
 
+	// ── AI 增强（后台执行，先让用户看到 Saved，等 AI 完成再退出）──
+	if Cfg != nil && Cfg.AI.IsConfigured() {
+		allTags, _ := db.ListAllTags(Store.DB)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := ai.NewClient(Cfg.AI.GetAPIKey(), Cfg.AI.GetGenModel())
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags)
+			if err != nil {
+				return
+			}
+
+			// 写入 ai_note
+			if result.Description != "" {
+				_ = db.UpdateAiNote(Store.DB, bm.ID, result.Description)
+			}
+
+			// AI 推荐的标签（叠加不覆盖已有标签）
+			if len(result.Tags) > 0 {
+				var newTags []string
+				for _, t := range result.Tags {
+					if !containsTag(tagList, t) {
+						newTags = append(newTags, t)
+					}
+				}
+				if len(newTags) > 0 {
+					_ = db.AddTagsToBookmark(Store.DB, bm.ID, newTags)
+					fmt.Printf("  ✓ AI tagged: %s\n", strings.Join(newTags, ", "))
+				}
+			}
+		}()
+		wg.Wait()
+	}
+
 	return nil
+}
+
+// containsTag 检查 tag 列表中是否已包含指定 tag。
+func containsTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }

@@ -37,13 +37,15 @@ func BackupDB(dbPath string) (string, error) {
 	return backupPath, nil
 }
 
-// LocalBookmark 是从备份中读取的简化书签数据
+// LocalBookmark 是从备份中读取的简化书签数据。
+// 新增列时必须同步更新：此结构体、ReadAllBookmarksFromDB、MergeFromBackup。
 type LocalBookmark struct {
 	ID          string
 	URL         string
 	Title       string
 	Description string
 	Note        string
+	AiNote      string
 	SiteName    string
 	TagsText    string
 	ClickCount  int
@@ -62,7 +64,7 @@ func ReadAllBookmarks(dbPath string) ([]LocalBookmark, error) {
 	defer backup.Close()
 
 	rows, err := backup.Query(`
-		SELECT id, url, title, description, note, site_name, tags_text,
+		SELECT id, url, title, description, note, ai_note, site_name, tags_text,
 		       click_count, is_favorite, source, created_at, updated_at
 		FROM bookmarks
 	`)
@@ -75,7 +77,7 @@ func ReadAllBookmarks(dbPath string) ([]LocalBookmark, error) {
 	for rows.Next() {
 		var bm LocalBookmark
 		if err := rows.Scan(
-			&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note,
+			&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note, &bm.AiNote,
 			&bm.SiteName, &bm.TagsText, &bm.ClickCount, &bm.IsFavorite,
 			&bm.Source, &bm.CreatedAt, &bm.UpdatedAt,
 		); err != nil {
@@ -151,7 +153,7 @@ func ReadAllBookmarkTags(dbPath string) ([]BookmarkTagLink, error) {
 // ReadAllBookmarksFromDB 从已打开的 *sql.DB 读取所有书签（内存读取，不走文件）
 func ReadAllBookmarksFromDB(database *sql.DB) ([]LocalBookmark, error) {
 	rows, err := database.Query(`
-		SELECT id, url, title, description, note, site_name, tags_text,
+		SELECT id, url, title, description, note, ai_note, site_name, tags_text,
 		       click_count, is_favorite, source, created_at, updated_at
 		FROM bookmarks
 	`)
@@ -164,7 +166,7 @@ func ReadAllBookmarksFromDB(database *sql.DB) ([]LocalBookmark, error) {
 	for rows.Next() {
 		var bm LocalBookmark
 		if err := rows.Scan(
-			&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note,
+			&bm.ID, &bm.URL, &bm.Title, &bm.Description, &bm.Note, &bm.AiNote,
 			&bm.SiteName, &bm.TagsText, &bm.ClickCount, &bm.IsFavorite,
 			&bm.Source, &bm.CreatedAt, &bm.UpdatedAt,
 		); err != nil {
@@ -233,10 +235,10 @@ func MergeFromBackup(targetDB *sql.DB, bookmarks []LocalBookmark, tags []LocalTa
 	for _, bm := range bookmarks {
 		result, err := targetDB.Exec(
 			`INSERT OR IGNORE INTO bookmarks
-			 (id, url, title, description, note, site_name, tags_text,
+			 (id, url, title, description, note, ai_note, site_name, tags_text,
 			  click_count, is_favorite, source, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			bm.ID, bm.URL, bm.Title, bm.Description, bm.Note,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			bm.ID, bm.URL, bm.Title, bm.Description, bm.Note, bm.AiNote,
 			bm.SiteName, bm.TagsText, bm.ClickCount, bm.IsFavorite,
 			bm.Source, bm.CreatedAt, bm.UpdatedAt,
 		)

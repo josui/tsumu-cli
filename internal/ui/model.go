@@ -12,6 +12,7 @@
 package ui
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
 )
 
@@ -73,10 +75,15 @@ type Model struct {
 	allTags     []string // all existing tags (loaded on modeTag entry)
 	suggestions []string // current matching suggestions
 	selectedSug int      // selected suggestion index
+
+	// AI query expansion
+	aiAPIKey   string // Gemini API key（从 config 注入）
+	aiGenModel string // Gemini model name
+	aiExpanding bool  // 是否正在 AI 展开中
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string) Model {
+func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, aiAPIKey string, aiGenModel string) Model {
 	if pageSize <= 0 {
 		pageSize = 5
 	}
@@ -90,6 +97,8 @@ func NewModel(database *sql.DB, query string, favOnly bool, since string, tag st
 		syncStatus: syncStatus,
 		mode:       modeNormal,
 		width:      80, // 默认值，WindowSizeMsg 到达后会更新
+		aiAPIKey:   aiAPIKey,
+		aiGenModel: aiGenModel,
 	}
 }
 
@@ -152,6 +161,45 @@ func (m Model) doLoadAllTags() tea.Cmd {
 	return func() tea.Msg {
 		tags, err := db.ListAllTags(m.db)
 		return tagsLoadedMsg{tags: tags, err: err}
+	}
+}
+
+// aiExpandMsg 是 AI query expansion 完成后的消息
+type aiExpandMsg struct {
+	keywords []string
+	err      error
+}
+
+func (m Model) doAIExpand() tea.Cmd {
+	query := m.query
+	apiKey := m.aiAPIKey
+	genModel := m.aiGenModel
+	return func() tea.Msg {
+		client := ai.NewClient(apiKey, genModel)
+		keywords, err := client.ExpandQuery(context.Background(), query)
+		return aiExpandMsg{keywords: keywords, err: err}
+	}
+}
+
+func (m Model) doExpandedSearch(keywords []string) tea.Cmd {
+	return func() tea.Msg {
+		seen := make(map[string]bool)
+		var allResults []db.Bookmark
+
+		for _, kw := range keywords {
+			results, _, err := db.Search(m.db, kw, 50000, 0, m.since, m.favOnly, m.tag)
+			if err != nil {
+				continue
+			}
+			for _, bm := range results {
+				if !seen[bm.ID] {
+					seen[bm.ID] = true
+					allResults = append(allResults, bm)
+				}
+			}
+		}
+
+		return searchResultMsg{results: allResults, total: len(allResults), err: nil}
 	}
 }
 
@@ -294,6 +342,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case aiExpandMsg:
+		m.aiExpanding = false
+		if msg.err != nil {
+			m.message = "AI expand failed"
+			m.isError = true
+			return m, nil
+		}
+		if len(msg.keywords) == 0 {
+			m.message = ""
+			return m, nil
+		}
+		// 用展开的关键词搜索，合并去重
+		m.message = fmt.Sprintf("AI: %s", strings.Join(msg.keywords, ", "))
+		m.isError = false
+		return m, m.doExpandedSearch(msg.keywords)
+
 	case cursorBlinkMsg:
 		// 只处理当前代次的定时器，旧的自动丢弃
 		if msg.id != m.blinkID {
@@ -420,6 +484,16 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 	case keyNoteEditor:
 		if bm := m.focusedBookmark(); bm != nil {
 			return m, m.doEditNoteExternal(bm.ID, bm.Note)
+		}
+		return m, nil
+
+	// AI query expansion：query 非空且 AI 已配置时触发
+	case keyAIExpand:
+		if m.query != "" && m.aiAPIKey != "" && !m.aiExpanding {
+			m.aiExpanding = true
+			m.message = "AI expanding..."
+			m.isError = false
+			return m, m.doAIExpand()
 		}
 		return m, nil
 	}
@@ -788,6 +862,10 @@ func (m Model) View() string {
 		}
 	} else {
 		header = fmt.Sprintf("tsumu %s", m.query)
+		// AI expand 提示紧跟搜索词，比放在 help 栏更醒目
+		if m.aiAPIKey != "" {
+			header += "  [⇥ AI]"
+		}
 	}
 	rightParts := fmt.Sprintf("Page %d/%d", m.page()+1, m.totalPages())
 	if m.syncStatus != "" {

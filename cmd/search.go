@@ -12,7 +12,7 @@ import (
 
 // syncStatusText 返回 TUI header 用的 sync 状态文本。
 func syncStatusText() string {
-	if !Cfg.Sync.Enabled || Cfg.Sync.URL == "" {
+	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
 		return ""
 	}
 	if Cfg.Sync.LastSynced == "" {
@@ -28,8 +28,15 @@ func syncStatusText() string {
 
 // runSearch 启动搜索 TUI。
 func runSearch(query string, favOnly bool, since string, tag string) error {
+	// 从 Cfg 提取 AI 配置
+	var aiKey, aiModel string
+	if Cfg != nil && Cfg.AI.IsConfigured() {
+		aiKey = Cfg.AI.GetAPIKey()
+		aiModel = Cfg.AI.GetGenModel()
+	}
+
 	// 创建 bubbletea Model
-	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText())
+	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText(), aiKey, aiModel)
 
 	// tea.NewProgram 创建 TUI 程序
 	// tea.WithAltScreen: 使用备用屏幕缓冲区（退出时恢复原终端内容）

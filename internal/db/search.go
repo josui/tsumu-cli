@@ -124,8 +124,8 @@ LIMIT ? OFFSET ?`, whereClause)
 		var wheres []string
 		var args []any
 
-		wheres = append(wheres, "(b.title LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.site_name LIKE ? OR b.tags_text LIKE ?)")
-		args = append(args, likePattern, likePattern, likePattern, likePattern, likePattern)
+		wheres = append(wheres, "(b.title LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.ai_note LIKE ? OR b.site_name LIKE ? OR b.tags_text LIKE ?)")
+		args = append(args, likePattern, likePattern, likePattern, likePattern, likePattern, likePattern)
 
 		if since != "" {
 			wheres = append(wheres, "b.created_at >= ?")

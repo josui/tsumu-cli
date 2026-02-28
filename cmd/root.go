@@ -105,6 +105,8 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("day", "week", "month")
 
 	rootCmd.AddCommand(addCmd)
+	rootCmd.AddCommand(aiCmd)
+	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(completionCmd)
