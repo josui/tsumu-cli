@@ -81,6 +81,14 @@ func SetBookmarkTags(database *sql.DB, bookmarkID string, tagNames []string) err
 	if err := syncTagsText(tx, bookmarkID); err != nil {
 		return err
 	}
+
+	// 标签变更也要刷新 bookmarks.updated_at，确保 sync 能推送
+	if _, err := tx.Exec(
+		`UPDATE bookmarks SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`,
+		bookmarkID); err != nil {
+		return fmt.Errorf("touch bookmark updated_at: %w", err)
+	}
+
 	return tx.Commit()
 }
 
@@ -133,6 +141,13 @@ func AddTagsToBookmark(db *sql.DB, bookmarkID string, tagNames []string) error {
 	// 同步 tags_text 冗余字段
 	if err := syncTagsText(tx, bookmarkID); err != nil {
 		return err
+	}
+
+	// 标签变更也要刷新 bookmarks.updated_at，确保 sync 能推送
+	if _, err := tx.Exec(
+		`UPDATE bookmarks SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`,
+		bookmarkID); err != nil {
+		return fmt.Errorf("touch bookmark updated_at: %w", err)
 	}
 
 	return tx.Commit()

@@ -26,6 +26,7 @@ import (
 
 	"github.com/josui/tsumu-cli/internal/ai"
 	"github.com/josui/tsumu-cli/internal/db"
+	"github.com/josui/tsumu-cli/internal/meta"
 )
 
 // ============================================================
@@ -69,6 +70,7 @@ type Model struct {
 	cursorVisible bool   // 输入模式光标闪烁状态
 
 	syncStatus string // sync 状态文本（header 显示用）
+	lastSynced string // 上次 sync 时间（用于动态刷新 syncStatus）
 	width      int    // 终端宽度
 
 	// Tag autocomplete
@@ -83,7 +85,7 @@ type Model struct {
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, aiAPIKey string, aiGenModel string) Model {
+func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, lastSynced string, aiAPIKey string, aiGenModel string) Model {
 	if pageSize <= 0 {
 		pageSize = 5
 	}
@@ -95,6 +97,7 @@ func NewModel(database *sql.DB, query string, favOnly bool, since string, tag st
 		tag:        tag,
 		pageSize:   pageSize,
 		syncStatus: syncStatus,
+		lastSynced: lastSynced,
 		mode:       modeNormal,
 		width:      80, // 默认值，WindowSizeMsg 到达后会更新
 		aiAPIKey:   aiAPIKey,
@@ -168,6 +171,19 @@ func (m Model) doLoadAllTags() tea.Cmd {
 type aiExpandMsg struct {
 	keywords []string
 	err      error
+}
+
+// copyResultMsg 是复制完成后的消息（不触发 doSearch，避免消息被清掉）
+type copyResultMsg struct {
+	message string
+	isError bool
+}
+
+// refetchResultMsg 是 refetch 完成后的消息
+type refetchResultMsg struct {
+	title string // 更新后的标题（显示用）
+	hasAI bool   // 是否执行了 AI 增强
+	err   error
 }
 
 func (m Model) doAIExpand() tea.Cmd {
@@ -320,6 +336,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case copyResultMsg:
+		m.message = msg.message
+		m.isError = msg.isError
+		return m, nil
+
 	case actionResultMsg:
 		m.message = msg.message
 		m.isError = msg.isError
@@ -357,6 +378,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = fmt.Sprintf("AI: %s", strings.Join(msg.keywords, ", "))
 		m.isError = false
 		return m, m.doExpandedSearch(msg.keywords)
+
+	case refetchResultMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Refetch failed: %v", msg.err)
+			m.isError = true
+			return m, nil
+		}
+		if msg.hasAI {
+			m.message = fmt.Sprintf("✓ Refetched: %s", msg.title)
+		} else {
+			m.message = fmt.Sprintf("✓ Refetched (no AI): %s", msg.title)
+		}
+		m.isError = false
+		refreshSyncStatus(&m)
+		return m, m.doSearch()
 
 	case cursorBlinkMsg:
 		// 只处理当前代次的定时器，旧的自动丢弃
@@ -484,6 +520,22 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 	case keyNoteEditor:
 		if bm := m.focusedBookmark(); bm != nil {
 			return m, m.doEditNoteExternal(bm.ID, bm.Note)
+		}
+		return m, nil
+
+	// 复制选中项 URL 到剪贴板
+	case keyCopy:
+		if bm := m.focusedBookmark(); bm != nil {
+			return m, m.doCopyURL()
+		}
+		return m, nil
+
+	// 重新抓取选中项元数据 + AI note
+	case keyRefetch:
+		if bm := m.focusedBookmark(); bm != nil {
+			m.message = "⟳ Refetching..."
+			m.isError = false
+			return m, m.doRefetch()
 		}
 		return m, nil
 
@@ -845,6 +897,78 @@ func (m Model) doDelete() tea.Cmd {
 	}
 }
 
+// doCopyURL 复制选中书签的 URL 到系统剪贴板（macOS pbcopy）
+func (m Model) doCopyURL() tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	url := bm.URL
+
+	return func() tea.Msg {
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(url)
+		if err := cmd.Run(); err != nil {
+			return copyResultMsg{message: fmt.Sprintf("Copy failed: %v", err), isError: true}
+		}
+		return copyResultMsg{message: fmt.Sprintf("✓ Copied: %s", url)}
+	}
+}
+
+// doRefetch 重新抓取选中书签的元数据并重新生成 AI note。
+// 保留用户的 note 和已有 tags 不变。
+func (m Model) doRefetch() tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+	url := bm.URL
+	database := m.db
+	apiKey := m.aiAPIKey
+	genModel := m.aiGenModel
+
+	return func() tea.Msg {
+		// 1. 重新抓取网页元数据
+		fetched, err := meta.Fetch(url)
+		if err != nil {
+			return refetchResultMsg{err: fmt.Errorf("fetch failed: %w", err)}
+		}
+
+		// 2. 更新元数据（title, description, site_name）
+		if err := db.UpdateBookmarkMeta(database, id, fetched.Title, fetched.Description, fetched.SiteName); err != nil {
+			return refetchResultMsg{err: fmt.Errorf("update meta failed: %w", err)}
+		}
+
+		// 3. AI 增强（如果已配置 API key）
+		if apiKey == "" {
+			return refetchResultMsg{title: fetched.Title, hasAI: false}
+		}
+
+		// 加载所有已有标签（用于 AI 标签推荐）
+		allTags, _ := db.ListAllTags(database)
+
+		client := ai.NewClient(apiKey, genModel)
+		result, err := client.EnhanceBookmark(context.Background(), fetched.Title, url, fetched.SiteName, allTags)
+		if err != nil {
+			// AI 失败不阻断，元数据已更新成功
+			return refetchResultMsg{title: fetched.Title, hasAI: false}
+		}
+
+		// 4. 更新 ai_note
+		if result.Description != "" {
+			_ = db.UpdateAiNote(database, id, result.Description)
+		}
+
+		// 5. 追加 AI 推荐标签（不删除用户已有标签）
+		if len(result.Tags) > 0 {
+			_ = db.AddTagsToBookmark(database, id, result.Tags)
+		}
+
+		return refetchResultMsg{title: fetched.Title, hasAI: true}
+	}
+}
+
 // ============================================================
 // View 渲染
 // ============================================================
@@ -872,7 +996,7 @@ func (m Model) View() string {
 		rightParts += "  " + m.syncStatus
 	}
 	cw := m.contentWidth()
-	gap := cw - len(header) - len(rightParts)
+	gap := cw - stringWidth(header) - stringWidth(rightParts)
 	if gap < 2 {
 		gap = 2
 	}
@@ -954,7 +1078,7 @@ func (m Model) View() string {
 
 	// 操作提示
 	if m.mode == modeNormal {
-		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [n] note  [j]↓ [k]↑  [q] quit"))
+		b.WriteString(helpStyle.Render("  [↵] open  [t] tag  [f] fav  [d] del  [n] note  [c] copy  [r] refetch  [q] quit"))
 		b.WriteString("\n")
 	}
 
@@ -1041,6 +1165,21 @@ func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 	return b.String()
 }
 
+
+// refreshSyncStatus 重新查询 pending count 并更新 syncStatus 文本。
+// 在数据变更（refetch 等）后调用，使 header 状态及时反映变化。
+func refreshSyncStatus(m *Model) {
+	if m.lastSynced == "" {
+		return // sync 未配置或从未同步过，保持原状态
+	}
+	var pending int
+	m.db.QueryRow("SELECT COUNT(*) FROM bookmarks WHERE updated_at > ?", m.lastSynced).Scan(&pending)
+	if pending > 0 {
+		m.syncStatus = fmt.Sprintf("%d pending", pending)
+	} else {
+		m.syncStatus = "synced ✓"
+	}
+}
 
 // ============================================================
 // 辅助函数

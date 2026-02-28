@@ -36,7 +36,7 @@ func runSearch(query string, favOnly bool, since string, tag string) error {
 	}
 
 	// 创建 bubbletea Model
-	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText(), aiKey, aiModel)
+	model := ui.NewModel(Store.DB, query, favOnly, since, tag, Cfg.GetPageSize(), syncStatusText(), Cfg.Sync.LastSynced, aiKey, aiModel)
 
 	// tea.NewProgram 创建 TUI 程序
 	// tea.WithAltScreen: 使用备用屏幕缓冲区（退出时恢复原终端内容）

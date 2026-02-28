@@ -226,6 +226,28 @@ func UpdateAiNote(db *sql.DB, id string, aiNote string) error {
 	return nil
 }
 
+// UpdateBookmarkMeta 更新书签的元数据字段（标题、描述、站点名）。
+// 用于 refetch 场景，不影响 note、tags、ai_note 等用户/AI 字段。
+func UpdateBookmarkMeta(db *sql.DB, id string, title, description, siteName string) error {
+	result, err := db.Exec(
+		`UPDATE bookmarks
+		 SET title = ?, description = ?, site_name = ?,
+		     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE id = ? AND deleted_at IS NULL`, title, description, siteName, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update bookmark meta failed: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check affected rows failed: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("bookmark not found: %s", id)
+	}
+	return nil
+}
+
 // DeleteBookmark soft delete 指定书签及其关联的 bookmark_tags。
 // 通过设置 deleted_at 时间戳标记为已删除，不物理删除数据。
 func DeleteBookmark(db *sql.DB, id string) error {

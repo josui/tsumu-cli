@@ -19,4 +19,6 @@ const (
 	keyNote       = "n"   // 编辑选中项的 note（内联）
 	keyNoteEditor = "N"   // 用外部编辑器编辑 note
 	keyAIExpand   = "tab" // AI 搜索展开
+	keyCopy       = "c"   // 复制选中项 URL 到剪贴板
+	keyRefetch    = "r"   // 重新抓取选中项元数据 + AI note
 )
