@@ -56,22 +56,83 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncOff, "off", false, "disable sync")
 }
 
-// runSyncManual 手动触发同步
+// runSyncManual 手动触发同步。
+// libSQL embedded replica 只推送通过 connector 写入的数据，
+// 本地直写（tsumu add 等）不会自动推送。
+// 因此 sync 需要：读本地 → 拉远端 → merge 本地独有数据 → 推送。
 func runSyncManual() error {
 	if !Store.IsSynced() {
 		fmt.Println("  Sync not configured. Run: tsumu sync --setup")
 		return nil
 	}
 
-	_, err := Store.SyncNow()
+	// 1. 从当前连接读取本地全量数据到内存
+	localBookmarks, err := db.ReadAllBookmarksFromDB(Store.DB)
 	if err != nil {
-		return fmt.Errorf("sync failed: %w", err)
+		return fmt.Errorf("read local bookmarks: %w", err)
+	}
+	localTags, _ := db.ReadAllTagsFromDB(Store.DB)
+	localLinks, _ := db.ReadAllBookmarkTagsFromDB(Store.DB)
+
+	// 2. 关闭本地连接
+	Store.DB.Close()
+
+	// 3. 删除本地 db 文件（embedded replica 需要从零创建）
+	dbPath := Cfg.DBPath()
+	for _, suffix := range []string{"", "-wal", "-shm", "-info"} {
+		os.Remove(dbPath + suffix)
+	}
+
+	// 4. 用 embedded replica connector 重新打开
+	syncOpts := &db.SyncOpts{
+		PrimaryURL: Cfg.Sync.GetURL(),
+		AuthToken:  Cfg.Sync.GetAuthToken(),
+	}
+	newStore, err := db.OpenStoreWithConnector(dbPath, syncOpts)
+	if err != nil {
+		// 失败时尝试恢复本地连接
+		Store.ReopenLocal()
+		return fmt.Errorf("connect to remote: %w", err)
+	}
+
+	// 5. 拉取远端数据
+	_, err = newStore.Sync()
+	if err != nil {
+		newStore.Close()
+		Store.ReopenLocal()
+		return fmt.Errorf("pull remote: %w", err)
+	}
+
+	// 6. 把本地独有数据通过 connector 写入（这样才会推送到云端）
+	imported, err := db.MergeFromBackup(newStore.DB, localBookmarks, localTags, localLinks)
+	if err != nil {
+		newStore.Close()
+		Store.ReopenLocal()
+		return fmt.Errorf("merge: %w", err)
+	}
+
+	// 7. 推送合并后的数据到云端
+	_, err = newStore.Sync()
+	if err != nil {
+		newStore.Close()
+		Store.ReopenLocal()
+		return fmt.Errorf("push to remote: %w", err)
+	}
+
+	// 8. 关闭 connector，重开本地模式
+	newStore.Close()
+	if err := Store.ReopenLocal(); err != nil {
+		return fmt.Errorf("reopen local: %w", err)
 	}
 
 	Cfg.Sync.LastSynced = time.Now().UTC().Format(time.RFC3339)
 	Cfg.Save()
 
-	fmt.Println("  ✓ Synced")
+	if imported > 0 {
+		fmt.Printf("  ✓ Synced (%d new pushed)\n", imported)
+	} else {
+		fmt.Println("  ✓ Synced")
+	}
 	return nil
 }
 
@@ -192,7 +253,7 @@ func runSyncSetup() error {
 
 // runSyncStatus 显示同步状态
 func runSyncStatus() error {
-	if !Cfg.Sync.Enabled || Cfg.Sync.URL == "" {
+	if !Cfg.Sync.IsEnabled() || Cfg.Sync.GetURL() == "" {
 		fmt.Println("  Status:  disabled")
 		return nil
 	}
@@ -203,7 +264,7 @@ func runSyncStatus() error {
 	}
 
 	fmt.Printf("  Status:  enabled\n")
-	fmt.Printf("  Remote:  %s\n", Cfg.Sync.URL)
+	fmt.Printf("  Remote:  %s\n", Cfg.Sync.GetURL())
 	fmt.Printf("  Mode:    lazy (every %s)\n", interval)
 
 	if Cfg.Sync.LastSynced != "" {

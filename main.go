@@ -61,10 +61,10 @@ func main() {
 
 	// 2. 打开数据库（始终本地模式，快速启动）
 	var syncOpts *db.SyncOpts
-	if cfg.Sync.Enabled && cfg.Sync.URL != "" {
+	if cfg.Sync.IsEnabled() && cfg.Sync.GetURL() != "" {
 		syncOpts = &db.SyncOpts{
-			PrimaryURL: cfg.Sync.URL,
-			AuthToken:  cfg.Sync.AuthToken,
+			PrimaryURL: cfg.Sync.GetURL(),
+			AuthToken:  cfg.Sync.GetAuthToken(),
 		}
 	}
 
