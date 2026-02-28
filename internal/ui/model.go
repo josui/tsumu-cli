@@ -76,6 +76,7 @@ var commands = []command{
 	{name: "ai empty", desc: "Enhance empty only", category: "AI"},
 	{name: "config ai", desc: "Configure AI provider", category: "Config"},
 	{name: "config sync", desc: "Configure Turso sync", category: "Config"},
+	{name: "find", desc: "Search bookmarks", category: "Navigation"},
 }
 
 // ============================================================
@@ -950,7 +951,7 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommandKey 处理命令面板中的按键
-// 统一搜索/命令栏：Enter=搜索书签，Tab=执行命令，↑/↓/j/k=移动光标
+// 统一搜索/命令栏：Enter=搜索书签，Tab=执行命令，↑/↓=移动光标
 // cmdMaxVisible 计算命令列表区域最大可见行数
 // 窗口高度的 50% 减去固定行数（标题 2 行 + 搜索框 2 行 + 底部提示 2 行 + 边框 2 行 = 8 行）
 func (m Model) cmdMaxVisible() int {
@@ -988,7 +989,7 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
-		// 用输入内容搜索书签
+		// Enter: 用输入内容搜索书签
 		m.overlay = overlayNone
 		m.query = strings.TrimSpace(m.cmdFilter)
 		m.cmdFilter = ""
@@ -997,7 +998,7 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.doSearch()
 
 	case tea.KeyTab:
-		// 执行命令列表中当前高亮的命令
+		// Tab: 执行命令列表中当前高亮的命令
 		if len(m.cmdFiltered) == 0 {
 			return m, nil
 		}
@@ -1022,25 +1023,7 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
-		// j/k 等同于 ↑/↓，与主列表体验统一
-		if msg.Type == tea.KeyRunes {
-			ch := string(msg.Runes)
-			if ch == "j" {
-				if m.cmdCursor < len(m.cmdFiltered)-1 {
-					m.cmdCursor++
-					m.cmdEnsureVisible()
-				}
-				return m, nil
-			}
-			if ch == "k" {
-				if m.cmdCursor > 0 {
-					m.cmdCursor--
-					m.cmdEnsureVisible()
-				}
-				return m, nil
-			}
-		}
-		// 其余按键交给通用文本输入处理（光标移动、删除、字符插入）
+		// 按键交给通用文本输入处理（光标移动、删除、字符插入）
 		m.input = m.cmdFilter
 		result, cmd := m.handleTextInput(msg)
 		m2 := result.(Model)
@@ -1072,6 +1055,14 @@ func (m Model) executeCommand(name string) (tea.Model, tea.Cmd) {
 		return m.openConfigAI()
 	case "config sync":
 		return m.openConfigSync()
+	case "find":
+		// 关闭 overlay，用 cmdFilter 搜索书签（和 Enter 行为一致）
+		m.overlay = overlayNone
+		m.query = strings.TrimSpace(m.cmdFilter)
+		m.cmdFilter = ""
+		m.inputPos = 0
+		m.cursor = 0
+		return m, m.doSearch()
 	}
 	return m, nil
 }
@@ -2187,7 +2178,7 @@ func (m Model) renderCommandPalette() string {
 	}
 
 	// 底部提示
-	b.WriteString("\n" + overlayHintStyle.Render("enter search · tab command · esc close"))
+	b.WriteString("\n" + overlayHintStyle.Render("tab command · ↑↓ navigate · esc close"))
 
 	return overlayBorderStyle.Render(b.String())
 }
