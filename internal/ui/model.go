@@ -81,11 +81,12 @@ type Model struct {
 	// AI query expansion
 	aiAPIKey   string // Gemini API key（从 config 注入）
 	aiGenModel string // Gemini model name
+	aiLang     string // AI 生成语言配置（如 "zh,en"）
 	aiExpanding bool  // 是否正在 AI 展开中
 }
 
 // NewModel 创建并初始化 Model。
-func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, lastSynced string, aiAPIKey string, aiGenModel string) Model {
+func NewModel(database *sql.DB, query string, favOnly bool, since string, tag string, pageSize int, syncStatus string, lastSynced string, aiAPIKey string, aiGenModel string, aiLang string) Model {
 	if pageSize <= 0 {
 		pageSize = 5
 	}
@@ -102,6 +103,7 @@ func NewModel(database *sql.DB, query string, favOnly bool, since string, tag st
 		width:      80, // 默认值，WindowSizeMsg 到达后会更新
 		aiAPIKey:   aiAPIKey,
 		aiGenModel: aiGenModel,
+		aiLang:     aiLang,
 	}
 }
 
@@ -927,6 +929,7 @@ func (m Model) doRefetch() tea.Cmd {
 	database := m.db
 	apiKey := m.aiAPIKey
 	genModel := m.aiGenModel
+	lang := m.aiLang
 
 	return func() tea.Msg {
 		// 1. 重新抓取网页元数据
@@ -949,15 +952,16 @@ func (m Model) doRefetch() tea.Cmd {
 		allTags, _ := db.ListAllTags(database)
 
 		client := ai.NewClient(apiKey, genModel)
-		result, err := client.EnhanceBookmark(context.Background(), fetched.Title, url, fetched.SiteName, allTags)
+		result, err := client.EnhanceBookmark(context.Background(), fetched.Title, url, fetched.SiteName, allTags, lang)
 		if err != nil {
 			// AI 失败不阻断，元数据已更新成功
 			return refetchResultMsg{title: fetched.Title, hasAI: false}
 		}
 
-		// 4. 更新 ai_note
+		// 4. 更新 ai_note（description + keywords 拼接）
 		if result.Description != "" {
-			_ = db.UpdateAiNote(database, id, result.Description)
+			note := ai.FormatAiNote(result.Description, result.Keywords)
+			_ = db.UpdateAiNote(database, id, note)
 		}
 
 		// 5. 追加 AI 推荐标签（不删除用户已有标签）

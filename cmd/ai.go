@@ -119,7 +119,7 @@ func runAI() error {
 			}
 
 			// 一次 API 调用：描述 + 标签
-			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags)
+			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags, Cfg.AI.GetLang())
 			if err != nil {
 				res.err = err
 				skipped.Add(1)
@@ -129,9 +129,10 @@ func runAI() error {
 
 			did := false
 
-			// 写入 ai_note
+			// 写入 ai_note（description + keywords 拼接）
 			if bm.AiNote == "" && result.Description != "" {
-				if err := db.UpdateAiNote(Store.DB, bm.ID, result.Description); err == nil {
+				note := ai.FormatAiNote(result.Description, result.Keywords)
+				if err := db.UpdateAiNote(Store.DB, bm.ID, note); err == nil {
 					descsGenerated.Add(1)
 					did = true
 				}

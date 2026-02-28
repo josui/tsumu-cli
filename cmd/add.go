@@ -123,14 +123,15 @@ func runAdd(rawURL string, note string, tags string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
-			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags)
+			result, err := client.EnhanceBookmark(ctx, bm.Title, bm.URL, bm.SiteName, allTags, Cfg.AI.GetLang())
 			if err != nil {
 				return
 			}
 
-			// 写入 ai_note
+			// 写入 ai_note（description + keywords 拼接）
 			if result.Description != "" {
-				_ = db.UpdateAiNote(Store.DB, bm.ID, result.Description)
+				note := ai.FormatAiNote(result.Description, result.Keywords)
+				_ = db.UpdateAiNote(Store.DB, bm.ID, note)
 			}
 
 			// AI 推荐的标签（叠加不覆盖已有标签）
