@@ -566,7 +566,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.id != m.blinkID {
 			return m, nil
 		}
-		if m.mode == modeTag || m.mode == modeNote {
+		// 内联输入模式或 overlay 输入表单中都需要闪烁
+		if m.mode == modeTag || m.mode == modeNote ||
+			m.overlay == overlayCommand || m.overlay == overlayAddForm ||
+			m.overlay == overlayConfigAI || m.overlay == overlayConfigSync {
 			m.cursorVisible = !m.cursorVisible
 			return m, cursorBlink(m.blinkID)
 		}
@@ -616,8 +619,13 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 	case keyQuit:
 		return m, tea.Quit
 
-	// 清除消息
+	// esc：有 query 时清空 query 刷新全列表，无 query 时清除消息
 	case keyEsc:
+		if m.query != "" {
+			m.query = ""
+			m.cursor = 0
+			return m, m.doSearch()
+		}
 		m.message = ""
 		return m, nil
 
@@ -714,9 +722,10 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 	case keyCommand:
 		m.overlay = overlayCommand
 		m.cmdFilter = ""
+		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
-		return m, nil
+		return m, m.resetBlink()
 
 	// AI query expansion：query 非空且 AI 已配置时触发
 	case keyAIExpand:
@@ -935,21 +944,40 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleCommandKey 处理命令面板中的按键（搜索、选择、关闭）
+// handleCommandKey 处理命令面板中的按键
+// 统一搜索/命令栏：Enter=搜索书签，Tab=执行命令，↑/↓/j/k=移动光标
 func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEscape:
+		// 有输入时清空回全列表，无输入时关闭
+		if m.cmdFilter != "" {
+			m.cmdFilter = ""
+			m.inputPos = 0
+			m.cmdFiltered = fuzzyMatch("", commands)
+			m.cmdCursor = 0
+			return m, m.resetBlink()
+		}
 		m.overlay = overlayNone
-		m.cmdFilter = ""
 		return m, nil
 
 	case tea.KeyEnter:
+		// 用输入内容搜索书签
+		m.overlay = overlayNone
+		m.query = strings.TrimSpace(m.cmdFilter)
+		m.cmdFilter = ""
+		m.inputPos = 0
+		m.cursor = 0
+		return m, m.doSearch()
+
+	case tea.KeyTab:
+		// 执行命令列表中当前高亮的命令
 		if len(m.cmdFiltered) == 0 {
 			return m, nil
 		}
 		selected := commands[m.cmdFiltered[m.cmdCursor]]
 		m.overlay = overlayNone
 		m.cmdFilter = ""
+		m.inputPos = 0
 		return m.executeCommand(selected.name)
 
 	case tea.KeyUp:
@@ -964,37 +992,32 @@ func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyBackspace:
-		if len(m.cmdFilter) > 0 {
-			runes := []rune(m.cmdFilter)
-			m.cmdFilter = string(runes[:len(runes)-1])
-			m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
-			m.cmdCursor = 0
-		}
-		return m, nil
-
 	default:
+		// j/k 等同于 ↑/↓，与主列表体验统一
 		if msg.Type == tea.KeyRunes {
 			ch := string(msg.Runes)
-			// j/k 等同于 ↑/↓，与主列表体验统一
-			switch ch {
-			case "j":
+			if ch == "j" {
 				if m.cmdCursor < len(m.cmdFiltered)-1 {
 					m.cmdCursor++
 				}
 				return m, nil
-			case "k":
+			}
+			if ch == "k" {
 				if m.cmdCursor > 0 {
 					m.cmdCursor--
 				}
 				return m, nil
-			default:
-				m.cmdFilter += ch
-				m.cmdFiltered = fuzzyMatch(m.cmdFilter, commands)
-				m.cmdCursor = 0
 			}
 		}
-		return m, nil
+		// 其余按键交给通用文本输入处理（光标移动、删除、字符插入）
+		m.input = m.cmdFilter
+		result, cmd := m.handleTextInput(msg)
+		m2 := result.(Model)
+		m2.cmdFilter = m2.input
+		m2.input = ""
+		m2.cmdFiltered = fuzzyMatch(m2.cmdFilter, commands)
+		m2.cmdCursor = 0
+		return m2, cmd
 	}
 }
 
@@ -1032,17 +1055,20 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 回到命令面板而不是直接关闭 overlay
 		m.overlay = overlayCommand
 		m.cmdFilter = ""
+		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
-		return m, nil
+		return m, m.resetBlink()
 
 	case tea.KeyTab:
 		m.addFocus = (m.addFocus + 1) % 3
-		return m, nil
+		m.inputPos = len([]rune(m.addFields[m.addFocus]))
+		return m, m.resetBlink()
 
 	case tea.KeyShiftTab:
 		m.addFocus = (m.addFocus + 2) % 3
-		return m, nil
+		m.inputPos = len([]rune(m.addFields[m.addFocus]))
+		return m, m.resetBlink()
 
 	case tea.KeyEnter:
 		url := strings.TrimSpace(m.addFields[0])
@@ -1054,24 +1080,14 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addSubmitting = true
 		return m, m.doAddBookmark(url, m.addFields[1], m.addFields[2])
 
-	case tea.KeyBackspace:
-		runes := []rune(m.addFields[m.addFocus])
-		if len(runes) > 0 {
-			m.addFields[m.addFocus] = string(runes[:len(runes)-1])
-		}
-		return m, nil
-
-	case tea.KeyCtrlU:
-		m.addFields[m.addFocus] = ""
-		return m, nil
-
 	default:
-		if msg.Type == tea.KeyRunes {
-			m.addFields[m.addFocus] += string(msg.Runes)
-		} else if msg.Type == tea.KeySpace {
-			m.addFields[m.addFocus] += " "
-		}
-		return m, nil
+		// 交给通用文本输入处理（光标移动、删除、字符插入）
+		m.input = m.addFields[m.addFocus]
+		result, cmd := m.handleTextInput(msg)
+		m2 := result.(Model)
+		m2.addFields[m2.addFocus] = m2.input
+		m2.input = ""
+		return m2, cmd
 	}
 }
 
@@ -1082,17 +1098,20 @@ func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 回到命令面板
 		m.overlay = overlayCommand
 		m.cmdFilter = ""
+		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
-		return m, nil
+		return m, m.resetBlink()
 
 	case tea.KeyTab:
 		m.aiConfigFocus = (m.aiConfigFocus + 1) % 4
-		return m, nil
+		m.inputPos = len([]rune(m.aiConfigFields[m.aiConfigFocus]))
+		return m, m.resetBlink()
 
 	case tea.KeyShiftTab:
 		m.aiConfigFocus = (m.aiConfigFocus + 3) % 4
-		return m, nil
+		m.inputPos = len([]rune(m.aiConfigFields[m.aiConfigFocus]))
+		return m, m.resetBlink()
 
 	case tea.KeyEnter:
 		// 保存 AI 配置
@@ -1110,24 +1129,14 @@ func (m Model) handleConfigAIKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.overlay = overlayNone
 		return m, nil
 
-	case tea.KeyBackspace:
-		runes := []rune(m.aiConfigFields[m.aiConfigFocus])
-		if len(runes) > 0 {
-			m.aiConfigFields[m.aiConfigFocus] = string(runes[:len(runes)-1])
-		}
-		return m, nil
-
-	case tea.KeyCtrlU:
-		m.aiConfigFields[m.aiConfigFocus] = ""
-		return m, nil
-
 	default:
-		if msg.Type == tea.KeyRunes {
-			m.aiConfigFields[m.aiConfigFocus] += string(msg.Runes)
-		} else if msg.Type == tea.KeySpace {
-			m.aiConfigFields[m.aiConfigFocus] += " "
-		}
-		return m, nil
+		// 交给通用文本输入处理
+		m.input = m.aiConfigFields[m.aiConfigFocus]
+		result, cmd := m.handleTextInput(msg)
+		m2 := result.(Model)
+		m2.aiConfigFields[m2.aiConfigFocus] = m2.input
+		m2.input = ""
+		return m2, cmd
 	}
 }
 
@@ -1138,17 +1147,28 @@ func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 回到命令面板
 		m.overlay = overlayCommand
 		m.cmdFilter = ""
+		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
-		return m, nil
+		return m, m.resetBlink()
 
 	case tea.KeyTab:
 		m.syncConfigFocus = (m.syncConfigFocus + 1) % 4
-		return m, nil
+		if m.syncConfigFocus == 3 {
+			m.inputPos = 0 // Enabled toggle 不需要光标位置
+		} else {
+			m.inputPos = len([]rune(m.syncConfigFields[m.syncConfigFocus]))
+		}
+		return m, m.resetBlink()
 
 	case tea.KeyShiftTab:
 		m.syncConfigFocus = (m.syncConfigFocus + 3) % 4
-		return m, nil
+		if m.syncConfigFocus == 3 {
+			m.inputPos = 0
+		} else {
+			m.inputPos = len([]rune(m.syncConfigFields[m.syncConfigFocus]))
+		}
+		return m, m.resetBlink()
 
 	case tea.KeyEnter:
 		// 保存 Sync 配置
@@ -1167,26 +1187,8 @@ func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		refreshSyncStatus(&m)
 		return m, nil
 
-	case tea.KeyBackspace:
-		// Enabled 字段不支持退格
-		if m.syncConfigFocus == 3 {
-			return m, nil
-		}
-		runes := []rune(m.syncConfigFields[m.syncConfigFocus])
-		if len(runes) > 0 {
-			m.syncConfigFields[m.syncConfigFocus] = string(runes[:len(runes)-1])
-		}
-		return m, nil
-
-	case tea.KeyCtrlU:
-		if m.syncConfigFocus == 3 {
-			return m, nil
-		}
-		m.syncConfigFields[m.syncConfigFocus] = ""
-		return m, nil
-
 	default:
-		// Enabled 字段：space 切换 true/false
+		// Enabled 字段：只支持 space 切换 true/false
 		if m.syncConfigFocus == 3 {
 			if msg.Type == tea.KeySpace {
 				if m.syncConfigFields[3] == "true" {
@@ -1197,12 +1199,13 @@ func (m Model) handleConfigSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.Type == tea.KeyRunes {
-			m.syncConfigFields[m.syncConfigFocus] += string(msg.Runes)
-		} else if msg.Type == tea.KeySpace {
-			m.syncConfigFields[m.syncConfigFocus] += " "
-		}
-		return m, nil
+		// 其余字段交给通用文本输入处理
+		m.input = m.syncConfigFields[m.syncConfigFocus]
+		result, cmd := m.handleTextInput(msg)
+		m2 := result.(Model)
+		m2.syncConfigFields[m2.syncConfigFocus] = m2.input
+		m2.input = ""
+		return m2, cmd
 	}
 }
 
@@ -1212,8 +1215,10 @@ func (m Model) handleSyncStatusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 回到命令面板
 		m.overlay = overlayCommand
 		m.cmdFilter = ""
+		m.inputPos = 0
 		m.cmdFiltered = fuzzyMatch("", commands)
 		m.cmdCursor = 0
+		return m, m.resetBlink()
 	} else if msg.String() == "q" {
 		m.overlay = overlayNone
 	}
@@ -1226,7 +1231,8 @@ func (m Model) openAddForm() (tea.Model, tea.Cmd) {
 	m.addFields = [3]string{"", "", ""}
 	m.addFocus = 0
 	m.addSubmitting = false
-	return m, nil
+	m.inputPos = 0
+	return m, m.resetBlink()
 }
 
 // startSync 启动后台同步
@@ -1271,7 +1277,8 @@ func (m Model) openConfigAI() (tea.Model, tea.Cmd) {
 		m.cfg.AI.GetLang(),
 	}
 	m.aiConfigFocus = 0
-	return m, nil
+	m.inputPos = len([]rune(m.aiConfigFields[0]))
+	return m, m.resetBlink()
 }
 
 // openConfigSync 打开 Sync 配置表单，预填充当前配置
@@ -1284,7 +1291,8 @@ func (m Model) openConfigSync() (tea.Model, tea.Cmd) {
 		fmt.Sprintf("%t", m.cfg.Sync.Enabled),
 	}
 	m.syncConfigFocus = 0
-	return m, nil
+	m.inputPos = len([]rune(m.syncConfigFields[0]))
+	return m, m.resetBlink()
 }
 
 // ============================================================
@@ -1861,9 +1869,14 @@ func (m Model) renderAddForm() string {
 	for i := 0; i < 3; i++ {
 		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
 
-		content := m.addFields[i]
-		if content == "" && placeholders[i] != "" && !m.addSubmitting {
+		var content string
+		if i == m.addFocus && !m.addSubmitting {
+			// 聚焦字段：显示光标
+			content = m.renderFieldWithCursor(m.addFields[i])
+		} else if m.addFields[i] == "" && placeholders[i] != "" && !m.addSubmitting {
 			content = overlayHintStyle.Render(placeholders[i])
+		} else {
+			content = m.addFields[i]
 		}
 
 		fieldStyle := overlayFieldStyle
@@ -1964,9 +1977,14 @@ func (m Model) renderConfigAI() string {
 	for i := 0; i < 4; i++ {
 		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
 
-		content := m.aiConfigFields[i]
-		if content == "" && placeholders[i] != "" {
+		var content string
+		if i == m.aiConfigFocus {
+			// 聚焦字段：显示光标
+			content = m.renderFieldWithCursor(m.aiConfigFields[i])
+		} else if m.aiConfigFields[i] == "" && placeholders[i] != "" {
 			content = overlayHintStyle.Render(placeholders[i])
+		} else {
+			content = m.aiConfigFields[i]
 		}
 
 		fieldStyle := overlayFieldStyle
@@ -2018,13 +2036,16 @@ func (m Model) renderConfigSync() string {
 
 		var content string
 		if i == 3 {
-			// Enabled 字段：toggle 显示
+			// Enabled 字段：toggle 显示（无光标）
 			enabled := m.syncConfigFields[3] == "true"
 			if enabled {
 				content = messageStyle.Render("● Enabled")
 			} else {
 				content = overlayHintStyle.Render("○ Disabled")
 			}
+		} else if i == m.syncConfigFocus {
+			// 聚焦字段：显示光标
+			content = m.renderFieldWithCursor(m.syncConfigFields[i])
 		} else {
 			content = m.syncConfigFields[i]
 			if content == "" && placeholders[i] != "" {
@@ -2062,12 +2083,21 @@ func (m Model) renderCommandPalette() string {
 	}
 	b.WriteString(title + strings.Repeat(" ", gap) + hint + "\n\n")
 
-	// 搜索框
-	searchText := m.cmdFilter
-	if searchText == "" {
-		searchText = overlayHintStyle.Render("Search commands...")
+	// 搜索框（带光标）
+	var searchContent string
+	if m.cmdFilter == "" && m.inputPos == 0 {
+		// 空输入时：光标 + placeholder
+		var cursor string
+		if m.cursorVisible {
+			cursor = inputCursorStyle.Render(" ")
+		} else {
+			cursor = " "
+		}
+		searchContent = cursor + overlayHintStyle.Render("Search or type command...")
+	} else {
+		searchContent = m.renderFieldWithCursor(m.cmdFilter)
 	}
-	b.WriteString(searchText + "\n\n")
+	b.WriteString(searchContent + "\n\n")
 
 	// 命令列表（按分类分组）
 	lastCategory := ""
@@ -2098,7 +2128,7 @@ func (m Model) renderCommandPalette() string {
 	}
 
 	// 底部提示
-	b.WriteString("\n" + overlayHintStyle.Render("enter select · esc close"))
+	b.WriteString("\n" + overlayHintStyle.Render("enter search · tab command · esc close"))
 
 	return overlayBorderStyle.Render(b.String())
 }
@@ -2215,6 +2245,34 @@ func truncate(s string, maxWidth int) string {
 		return s
 	}
 	return runewidth.Truncate(s, maxWidth, "..")
+}
+
+// renderFieldWithCursor 渲染带光标的输入字段内容。
+// 光标处字符用反色样式，末尾时显示反色空格。闪烁周期由 cursorVisible 控制。
+func (m Model) renderFieldWithCursor(value string) string {
+	runes := []rune(value)
+	pos := m.inputPos
+	// 防御：clamp 到合法范围
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+	before := string(runes[:pos])
+	cursorChar := " "
+	after := ""
+	if pos < len(runes) {
+		cursorChar = string(runes[pos])
+		after = string(runes[pos+1:])
+	}
+	var cursor string
+	if m.cursorVisible {
+		cursor = inputCursorStyle.Render(cursorChar)
+	} else {
+		cursor = cursorChar
+	}
+	return before + cursor + after
 }
 
 // fuzzyMatch 简单的子串匹配（name 和 desc 都参与）
