@@ -143,8 +143,12 @@ func (a *AIConfig) GetLang() string {
 }
 
 // IsConfigured returns true if AI is set up.
-// 环境变量 TSUMU_AI_API_KEY 存在，或 config.toml 中有 provider + api_key。
+// ollama 等本地 provider 不需要 API key，只要 provider 非空即可。
+// 其他 provider（gemini 等）需要 API key。
 func (a *AIConfig) IsConfigured() bool {
+	if a.Provider == "ollama" {
+		return true
+	}
 	return a.GetAPIKey() != ""
 }
 
