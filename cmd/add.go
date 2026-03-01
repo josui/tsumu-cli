@@ -65,7 +65,7 @@ func runAdd(rawURL string, note string, tags string) error {
 		fmt.Printf("  ⚠ Metadata fetch failed: %v\n", err)
 		metadata = &meta.Metadata{
 			Title:    cleanedURL,
-			SiteName: cleanedURL,
+			SiteName: meta.ExtractDomain(cleanedURL),
 		}
 	}
 

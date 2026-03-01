@@ -200,48 +200,43 @@ func Fetch(rawURL string) (*Metadata, error) {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close() // 必须关闭 body，否则 HTTP 连接不会归还连接池
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
-	}
-
-	// goquery 从 io.Reader 解析 HTML DOM
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("HTML parse failed: %w", err)
-	}
-
 	meta := &Metadata{}
-
-	// --- 提取 title ---
-	// 优先级：og:title > <title> > headless browser > URL path
-	meta.Title = getMetaProperty(doc, "og:title")
-	if meta.Title == "" {
-		meta.Title = strings.TrimSpace(doc.Find("title").First().Text())
-	}
-
-	// --- 提取 description ---
-	// 优先级：og:description > <meta name="description">
-	meta.Description = getMetaProperty(doc, "og:description")
-	if meta.Description == "" {
-		meta.Description = getMetaName(doc, "description")
-	}
-
-	// --- 提取 site_name ---
-	// 统一使用域名，保证 TUI 显示一致
 	meta.SiteName = extractDomain(rawURL)
 
-	// --- Fallback：SPA / CSR 站点标题抓取 ---
-	// HTTP fetch 拿不到标题时，尝试无头浏览器渲染后获取 document.title，
-	// 再不行则从 URL 路径生成可读标题，确保标题永远不为空。
+	// --- HTTP 请求 + HTML 解析 ---
+	// 非 200 或请求失败时不直接返回错误，跳过 HTML 解析进入 fallback 链。
+	// 典型场景：Vercel Bot Protection (429)、Cloudflare WAF 等。
+	resp, err := client.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			if doc, parseErr := goquery.NewDocumentFromReader(resp.Body); parseErr == nil {
+				// --- 提取 title ---
+				// 优先级：og:title > <title>
+				meta.Title = getMetaProperty(doc, "og:title")
+				if meta.Title == "" {
+					meta.Title = strings.TrimSpace(doc.Find("title").First().Text())
+				}
+
+				// --- 提取 description ---
+				// 优先级：og:description > <meta name="description">
+				meta.Description = getMetaProperty(doc, "og:description")
+				if meta.Description == "" {
+					meta.Description = getMetaName(doc, "description")
+				}
+			}
+		}
+	}
+
+	// --- Fallback：Wayback Machine 缓存 ---
+	// HTTP fetch 拿不到标题时，查 Wayback Machine 的缓存页面提取标题。
+	// 典型场景：Vercel Bot Protection (429)、Cloudflare WAF 等拦截非浏览器请求的站点。
+	// 现代 SPA 框架（Next.js, Nuxt 等）普遍有 SSR/SSG，OGP 标签在 HTML 里直接可用，
+	// 不需要无头浏览器渲染。
 	if meta.Title == "" {
-		if headlessTitle, err := fetchHeadlessTitle(rawURL); err == nil {
-			meta.Title = headlessTitle
+		if t, err := fetchWaybackTitle(rawURL); err == nil && t != "" {
+			meta.Title = t
 		}
 	}
 	if meta.Title == "" {
