@@ -316,7 +316,7 @@ func (m Model) doExpandedSearch(keywords []string) tea.Cmd {
 }
 
 // computeSuggestions filters allTags by prefix match on the current token.
-// Returns up to 5 matches.
+// Returns up to 3 matches.
 func computeSuggestions(allTags []string, token string) []string {
 	if token == "" {
 		return nil
@@ -327,7 +327,7 @@ func computeSuggestions(allTags []string, token string) []string {
 	for _, tag := range allTags {
 		if strings.HasPrefix(strings.ToLower(tag), token) {
 			result = append(result, tag)
-			if len(result) >= 5 {
+			if len(result) >= 3 {
 				break
 			}
 		}

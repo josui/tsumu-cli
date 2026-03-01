@@ -34,8 +34,12 @@ var (
 	headerStyle       = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
 	tagStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DAEA3"))
 	inputCursorStyle  = lipgloss.NewStyle().Reverse(true) // 输入光标：反色显示
-	suggestStyle      = lipgloss.NewStyle().Foreground(colorDim)
-	suggestSelStyle   = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	// Dropdown 样式（tag autocomplete）
+	dropdownBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(colorDim).
+				Padding(0, 1)
+	dropdownSelStyle = lipgloss.NewStyle().Background(lipgloss.Color("#444444")) // 选中项：灰底，避免纯白过亮
 )
 
 // Overlay 样式

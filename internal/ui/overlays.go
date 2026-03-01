@@ -163,14 +163,52 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.resetBlink()
 
 	case tea.KeyTab:
+		// Tags 字段有 suggestions 时 Tab 补全
+		if m.addFocus == 1 && len(m.suggestions) > 0 && m.selectedSug < len(m.suggestions) {
+			selected := m.suggestions[m.selectedSug]
+			parts := strings.Split(m.addFields[1], ",")
+			if len(parts) == 1 {
+				parts[0] = selected
+			} else {
+				parts[len(parts)-1] = " " + selected
+			}
+			m.addFields[1] = strings.Join(parts, ",") + ", "
+			m.inputPos = len([]rune(m.addFields[1]))
+			m.suggestions = nil
+			m.selectedSug = 0
+			return m, m.resetBlink()
+		}
+		// 切换字段时清空 suggestions
+		m.suggestions = nil
+		m.selectedSug = 0
 		m.addFocus = (m.addFocus + 1) % 3
 		m.inputPos = len([]rune(m.addFields[m.addFocus]))
 		return m, m.resetBlink()
 
 	case tea.KeyShiftTab:
+		m.suggestions = nil
+		m.selectedSug = 0
 		m.addFocus = (m.addFocus + 2) % 3
 		m.inputPos = len([]rune(m.addFields[m.addFocus]))
 		return m, m.resetBlink()
+
+	case tea.KeyUp:
+		if m.addFocus == 1 && len(m.suggestions) > 0 {
+			m.selectedSug--
+			if m.selectedSug < 0 {
+				m.selectedSug = len(m.suggestions) - 1
+			}
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		if m.addFocus == 1 && len(m.suggestions) > 0 {
+			m.selectedSug++
+			if m.selectedSug >= len(m.suggestions) {
+				m.selectedSug = 0
+			}
+		}
+		return m, nil
 
 	case tea.KeyEnter:
 		url := strings.TrimSpace(m.addFields[0])
@@ -189,6 +227,12 @@ func (m Model) handleAddFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m2 := result.(Model)
 		m2.addFields[m2.addFocus] = m2.input
 		m2.input = ""
+		// Tags 字段：计算 autocomplete suggestions
+		if m2.addFocus == 1 {
+			token := currentTagToken(m2.addFields[1])
+			m2.suggestions = computeSuggestions(m2.allTags, token)
+			m2.selectedSug = 0
+		}
 		return m2, cmd
 	}
 }
@@ -337,7 +381,9 @@ func (m Model) openAddForm() (tea.Model, tea.Cmd) {
 	m.addFocus = 0
 	m.addSubmitting = false
 	m.inputPos = 0
-	return m, m.resetBlink()
+	m.suggestions = nil
+	m.selectedSug = 0
+	return m, tea.Batch(m.resetBlink(), m.doLoadAllTags())
 }
 
 // startSync 启动后台同步

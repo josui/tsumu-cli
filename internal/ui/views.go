@@ -99,19 +99,12 @@ func (m Model) View() string {
 		b.WriteString(prefix + inputContent + "\n")
 
 		// Render suggestion dropdown (only in tag mode)
-		// Align suggestion text with the current token start position
 		if m.mode == modeTag && len(m.suggestions) > 0 {
 			token := currentTagToken(m.input)
-			tokenCol := 8 + stringWidth(m.input) - stringWidth(token) // 8 = len("  tags> ")
-			selPad := strings.Repeat(" ", max(tokenCol-2, 0))         // "→ " is 2 cols, place before token
-			normPad := strings.Repeat(" ", tokenCol)
-			for i, sug := range m.suggestions {
-				if i == m.selectedSug {
-					b.WriteString(selPad + suggestSelStyle.Render("→ "+sug) + "\n")
-				} else {
-					b.WriteString(normPad + suggestStyle.Render(sug) + "\n")
-				}
-			}
+			// tokenCol = "  tags> " 前缀宽度 + 输入文字到 token 起始的宽度
+			tokenCol := 8 + stringWidth(m.input) - stringWidth(token)
+			b.WriteString(renderDropdown(m.suggestions, m.selectedSug, tokenCol))
+			b.WriteString("\n")
 		}
 	}
 
@@ -175,17 +168,16 @@ func (m Model) renderAddForm() string {
 	// field 内容宽度 = overlay 内容宽度 - field 自身 border(2) + padding(2)
 	fieldW := w - 4
 
-	for i := 0; i < 3; i++ {
+	// renderField 渲染单个表单字段（label + input box）
+	renderField := func(i int) {
 		b.WriteString(overlayLabelStyle.Render(labels[i]) + "\n")
 
 		var content string
 		if i == m.addFocus && !m.addSubmitting {
-			// 聚焦字段：显示光标（带视口滚动）
 			content = m.renderFieldWithCursor(m.addFields[i], fieldW)
 		} else if m.addFields[i] == "" && placeholders[i] != "" && !m.addSubmitting {
 			content = overlayHintStyle.Render(placeholders[i])
 		} else {
-			// 非聚焦字段：左对齐截断
 			content = truncateField(m.addFields[i], fieldW)
 		}
 
@@ -194,20 +186,37 @@ func (m Model) renderAddForm() string {
 			fieldStyle = overlayFieldFocusStyle
 		}
 
-		// 用 lipgloss.Width() 测量可见宽度（ANSI-safe），手动 pad 到 fieldW
 		visW := lipgloss.Width(content)
 		if visW < fieldW {
 			content += strings.Repeat(" ", fieldW-visW)
 		}
 		b.WriteString(fieldStyle.Render(content) + "\n")
+	}
 
-		if i < 2 {
-			b.WriteString("\n")
-		}
+	// URL 字段
+	renderField(0)
+	b.WriteString("\n")
+
+	// Tags 字段
+	renderField(1)
+
+	// Tags 字段后：dropdown 替换 Note 区域，或正常渲染 Note
+	showDropdown := m.addFocus == 1 && len(m.suggestions) > 0 && !m.addSubmitting
+	if showDropdown {
+		token := currentTagToken(m.addFields[1])
+		// field border(1) + padding(1) = 2 列偏移
+		tokenCol := 2 + stringWidth(m.addFields[1]) - stringWidth(token)
+		b.WriteString(renderDropdown(m.suggestions, m.selectedSug, tokenCol))
+		b.WriteString("\n")
+	} else {
+		b.WriteString("\n") // Tags 和 Note 之间的空行分隔
+		renderField(2)
 	}
 
 	if m.addSubmitting {
 		b.WriteString("\n" + messageStyle.Render("⟳ Fetching metadata..."))
+	} else if showDropdown {
+		b.WriteString("\n" + overlayHintStyle.Render("tab complete · ↑↓ · enter submit"))
 	} else {
 		b.WriteString("\n" + overlayHintStyle.Render("tab next · shift+tab prev · enter submit"))
 	}

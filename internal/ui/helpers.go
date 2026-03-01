@@ -127,6 +127,60 @@ func fuzzyMatch(query string, cmds []command) []int {
 	return result
 }
 
+// renderDropdown 渲染带边框的 dropdown menu。
+// suggestions 是候选列表，selectedIdx 是当前选中索引，
+// tokenCol 是 dropdown 文字左边缘的列偏移（从行首算起）。
+// 返回多行字符串（含换行符），可直接嵌入到 View 输出中。
+func renderDropdown(suggestions []string, selectedIdx int, tokenCol int) string {
+	if len(suggestions) == 0 {
+		return ""
+	}
+
+	// 限制最多 3 条
+	items := suggestions
+	if len(items) > 3 {
+		items = items[:3]
+	}
+
+	// 计算 dropdown 内容宽度（最长 tag 的显示宽度）
+	maxW := 0
+	for _, s := range items {
+		if w := stringWidth(s); w > maxW {
+			maxW = w
+		}
+	}
+
+	// 构建每行内容，pad 到相同宽度
+	var rows []string
+	for i, s := range items {
+		padded := s + strings.Repeat(" ", maxW-stringWidth(s))
+		if i == selectedIdx {
+			rows = append(rows, dropdownSelStyle.Render(padded))
+		} else {
+			rows = append(rows, padded)
+		}
+	}
+
+	box := dropdownBorderStyle.Render(strings.Join(rows, "\n"))
+
+	// 左侧填充：tokenCol - border(1) - padding(1) = tokenCol - 2
+	indent := tokenCol - 2
+	if indent < 0 {
+		indent = 0
+	}
+	pad := strings.Repeat(" ", indent)
+
+	// 给 box 的每行加上 indent
+	var result strings.Builder
+	for i, line := range strings.Split(box, "\n") {
+		if i > 0 {
+			result.WriteString("\n")
+		}
+		result.WriteString(pad + line)
+	}
+	return result.String()
+}
+
 func OpenBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
