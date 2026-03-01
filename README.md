@@ -51,7 +51,7 @@ tsumu add https://example.com 这是一个备注
 
 自动抓取页面标题、描述和站点名（OGP 标签）。URL 后直接跟文字会自动作为备注。
 
-X/Twitter 链接通过 FixTweet API 获取 tweet 内容。URL 存储时自动去除 query 参数和 fragment。根据 config.toml `[domain_tags]` 自动按域名打标签。
+X/Twitter 链接通过 FixTweet API 获取 tweet 内容。WAF 保护站点（Vercel Bot Protection 等）自动通过 Wayback Machine 缓存抓取。URL 存储时自动去除 query 参数和 fragment。根据 config.toml `[domain_tags]` 自动按域名打标签。
 
 ### 云端同步
 
