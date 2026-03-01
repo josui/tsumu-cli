@@ -483,6 +483,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = msg.message
 		m.isError = msg.isError
 		if !msg.isError {
+			refreshSyncStatus(&m)
 			return m, m.doSearch()
 		}
 		return m, nil
@@ -554,12 +555,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.AI.IsConfigured() && msg.bmID != "" {
 			aiCmd = m.doBackgroundAIEnhance(msg.bmID)
 		}
+		refreshSyncStatus(&m)
 		return m, tea.Batch(m.doSearch(), aiCmd)
 
 	case aiEnhanceDoneMsg:
 		if msg.err == nil {
 			m.message = fmt.Sprintf("✦ AI enhanced: %s", msg.title)
 			m.isError = false
+			refreshSyncStatus(&m)
 			return m, m.doSearch()
 		}
 		return m, nil
@@ -599,6 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = fmt.Sprintf("✓ AI enhanced %d/%d bookmarks", msg.enhanced, msg.total)
 		}
 		m.isError = false
+		refreshSyncStatus(&m)
 		return m, m.doSearch()
 
 	case cursorBlinkMsg:
