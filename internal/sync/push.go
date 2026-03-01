@@ -284,6 +284,68 @@ func pushTags(ctx context.Context, localDB *sql.DB, client *Client) error {
 	return nil
 }
 
+// ensureReferencedBookmarks 确保指定的 bookmark_id 在远端都存在。
+// 远端 bookmark_tags 可能带有 FOREIGN KEY 约束，增量推送时只推了 updated_at 变化的
+// bookmark，但 bookmark_tag 引用的 bookmark 可能没在本轮推送范围内，导致 FK 失败。
+// 这里查询远端缺失的 bookmark，再从本地补推。
+func ensureReferencedBookmarks(ctx context.Context, localDB *sql.DB, client *Client, bmIDs []string) error {
+
+	// 查询远端哪些 bookmark_id 已存在
+	remoteUpdates, err := queryRemoteUpdatedAt(ctx, client, "bookmarks", "id", bmIDs)
+	if err != nil {
+		return err
+	}
+
+	// 找出远端缺失的 bookmark_id
+	var missing []string
+	for _, id := range bmIDs {
+		if _, exists := remoteUpdates[id]; !exists {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	// 从本地查询缺失的 bookmark 并推送到远端
+	placeholders := make([]string, len(missing))
+	queryArgs := make([]any, len(missing))
+	for i, id := range missing {
+		placeholders[i] = "?"
+		queryArgs[i] = id
+	}
+
+	q := fmt.Sprintf(`SELECT id, url, title, description, note, ai_note, site_name, tags_text,
+	                          click_count, is_favorite, source, created_at, updated_at, deleted_at
+	                   FROM bookmarks WHERE id IN (%s)`, strings.Join(placeholders, ","))
+	rows, err := localDB.Query(q, queryArgs...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var bm localBM
+		if err := rows.Scan(&bm.id, &bm.url, &bm.title, &bm.description, &bm.note, &bm.aiNote,
+			&bm.siteName, &bm.tagsText, &bm.clickCount, &bm.isFavorite,
+			&bm.source, &bm.createdAt, &bm.updatedAt, &bm.deletedAt); err != nil {
+			continue
+		}
+		_, iErr := client.ExecuteOne(ctx,
+			`INSERT OR IGNORE INTO bookmarks (id, url, title, description, note, ai_note, site_name, tags_text,
+			                        click_count, is_favorite, source, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			TextArg(bm.id), TextArg(bm.url), TextArg(bm.title), TextArg(bm.description),
+			TextArg(bm.note), TextArg(bm.aiNote), TextArg(bm.siteName), TextArg(bm.tagsText),
+			IntArg(bm.clickCount), IntArg(bm.isFavorite),
+			TextArg(bm.source), TextArg(bm.createdAt), TextArg(bm.updatedAt), deletedAtArg(bm.deletedAt))
+		if iErr != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ ensure bookmark [%s] failed: %v\n", bm.id[:8], iErr)
+		}
+	}
+	return nil
+}
+
 // pushBookmarkTags 推送本地变更的 bookmark_tags 到远端。
 func pushBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string) error {
 	q := `SELECT bookmark_id, tag_id, updated_at, deleted_at FROM bookmark_tags`
@@ -311,6 +373,24 @@ func pushBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, last
 			continue
 		}
 		links = append(links, l)
+	}
+
+	if len(links) == 0 {
+		return nil
+	}
+
+	// 远端 bookmark_tags 可能有 FOREIGN KEY 约束，
+	// 增量模式下被引用的 bookmark 可能没在本轮推送，需要先补推。
+	seen := make(map[string]bool)
+	var refBmIDs []string
+	for _, l := range links {
+		if !seen[l.bmID] {
+			seen[l.bmID] = true
+			refBmIDs = append(refBmIDs, l.bmID)
+		}
+	}
+	if err := ensureReferencedBookmarks(ctx, localDB, client, refBmIDs); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ ensure referenced bookmarks: %v\n", err)
 	}
 
 	var hasItemError bool
@@ -420,7 +500,46 @@ func ensureRemoteSchema(ctx context.Context, client *Client) (changed bool, err 
 			changed = true
 		}
 	}
+
+	// 远端 bookmark_tags 可能是带 FOREIGN KEY 约束的旧表，
+	// 增量 push 时会导致 FK 校验失败。检测并重建为无 FK 版本。
+	if migrated, mErr := migrateBookmarkTagsDropFK(ctx, client); mErr != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ migrate bookmark_tags FK: %v\n", mErr)
+	} else if migrated {
+		changed = true
+	}
+
 	return changed, nil
+}
+
+// migrateBookmarkTagsDropFK 检测远端 bookmark_tags 是否带 FOREIGN KEY 约束，
+// 如果是则重建为无 FK 的版本。SQLite 不支持 ALTER TABLE DROP CONSTRAINT，
+// 只能通过创建新表 → 复制数据 → 删旧表 → 重命名实现。
+func migrateBookmarkTagsDropFK(ctx context.Context, client *Client) (migrated bool, err error) {
+	res, err := client.ExecuteOne(ctx, `PRAGMA foreign_key_list(bookmark_tags)`)
+	if err != nil {
+		return false, nil // PRAGMA 不支持时静默跳过
+	}
+	if len(res.Rows) == 0 {
+		return false, nil // 无 FK，无需迁移
+	}
+
+	// 有 FK 约束，需要重建
+	stmts := []Stmt{
+		{SQL: `PRAGMA foreign_keys = OFF`},
+		{SQL: `CREATE TABLE IF NOT EXISTS bookmark_tags_v2 (
+			bookmark_id TEXT NOT NULL, tag_id TEXT NOT NULL,
+			updated_at TEXT, deleted_at TEXT DEFAULT NULL,
+			PRIMARY KEY (bookmark_id, tag_id)
+		)`},
+		{SQL: `INSERT OR IGNORE INTO bookmark_tags_v2 SELECT bookmark_id, tag_id, updated_at, deleted_at FROM bookmark_tags`},
+		{SQL: `DROP TABLE bookmark_tags`},
+		{SQL: `ALTER TABLE bookmark_tags_v2 RENAME TO bookmark_tags`},
+	}
+	if _, err := client.Execute(ctx, stmts); err != nil {
+		return false, fmt.Errorf("recreate bookmark_tags without FK: %w", err)
+	}
+	return true, nil
 }
 
 // btKey 是 bookmark_tags 的复合主键。
