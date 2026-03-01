@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -278,6 +279,58 @@ func UpdateBookmarkMeta(db *sql.DB, id string, title, description, siteName stri
 		return fmt.Errorf("bookmark not found: %s", id)
 	}
 	return nil
+}
+
+// AppendAINote 追加关键词到书签的 ai_note 字段（空格分隔，去重）。
+// 用于 AI 搜索学习：用户查询词沉淀到书签，使后续搜索直接命中。
+func AppendAINote(db *sql.DB, id string, keyword string) error {
+	var current sql.NullString
+	if err := db.QueryRow("SELECT ai_note FROM bookmarks WHERE id = ?", id).Scan(&current); err != nil {
+		return fmt.Errorf("read ai_note: %w", err)
+	}
+
+	existing := current.String
+
+	// 去重检查：按空格拆分，检查是否已包含
+	parts := strings.Fields(existing)
+	for _, p := range parts {
+		if p == keyword {
+			return nil // 已存在，跳过
+		}
+	}
+
+	var updated string
+	if existing == "" {
+		updated = keyword
+	} else {
+		updated = existing + " " + keyword
+	}
+
+	return UpdateAiNote(db, id, updated)
+}
+
+// RemoveFromAINote 从书签的 ai_note 字段移除指定关键词。
+// 用于用户标记搜索结果不相关时撤销关联。
+func RemoveFromAINote(db *sql.DB, id string, keyword string) error {
+	var current sql.NullString
+	if err := db.QueryRow("SELECT ai_note FROM bookmarks WHERE id = ?", id).Scan(&current); err != nil {
+		return fmt.Errorf("read ai_note: %w", err)
+	}
+
+	existing := current.String
+	if existing == "" {
+		return nil
+	}
+
+	parts := strings.Fields(existing)
+	var filtered []string
+	for _, p := range parts {
+		if p != keyword {
+			filtered = append(filtered, p)
+		}
+	}
+
+	return UpdateAiNote(db, id, strings.Join(filtered, " "))
 }
 
 // DeleteBookmark soft delete 指定书签及其关联的 bookmark_tags。

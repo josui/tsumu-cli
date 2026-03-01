@@ -139,6 +139,18 @@ func (m Model) handleNormalKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// 标记搜索结果不相关（toggle）
+	case keyIrrelevant:
+		if m.query != "" && m.focusedBookmark() != nil {
+			bm := m.focusedBookmark()
+			if m.irrelevantSet == nil {
+				m.irrelevantSet = make(map[string]bool)
+			}
+			m.irrelevantSet[bm.ID] = !m.irrelevantSet[bm.ID]
+			return m, m.doToggleIrrelevant()
+		}
+		return m, nil
+
 	// 打开命令面板
 	case keyCommand:
 		m.overlay = overlayCommand

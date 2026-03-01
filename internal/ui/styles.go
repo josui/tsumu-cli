@@ -33,6 +33,7 @@ var (
 	helpStyle         = lipgloss.NewStyle().Foreground(colorDim)
 	headerStyle       = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
 	tagStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DAEA3"))
+	dimTitleStyle     = lipgloss.NewStyle().Foreground(colorDim) // 不相关标记：灰掉 title
 	inputCursorStyle  = lipgloss.NewStyle().Reverse(true) // 输入光标：反色显示
 	// Dropdown 样式（tag autocomplete）
 	dropdownBorderStyle = lipgloss.NewStyle().

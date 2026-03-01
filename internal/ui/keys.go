@@ -21,5 +21,6 @@ const (
 	keyAIExpand   = "tab" // AI 搜索展开
 	keyCopy       = "c"   // 复制选中项 URL 到剪贴板
 	keyRefetch    = "r"   // 重新抓取选中项元数据 + AI note
+	keyIrrelevant = "x"   // 标记搜索结果不相关
 	keyCommand    = "/"   // 打开命令面板
 )

@@ -110,7 +110,10 @@ type Model struct {
 	selectedSug int      // selected suggestion index
 
 	// AI query expansion
-	aiExpanding bool // 是否正在 AI 展开中
+	aiExpanding   bool            // 是否正在 AI 展开中
+	aiExpanded    bool            // AI 展开结果是否正在显示
+	aiExpandQuery string          // AI 展开时的用户原始查询词
+	irrelevantSet map[string]bool // 被标记为不相关的书签 ID 集合（视觉状态 + 控制 ai_note 写入/移除）
 
 	// Overlay 状态
 	overlay         overlayType // 当前显示的 overlay
@@ -241,6 +244,15 @@ type aiExpandMsg struct {
 	err      error
 }
 
+// aiExpandedSearchMsg 是 AI expand 搜索完成后的消息（区分普通搜索）
+// 携带搜索结果 + 原始查询词，用于批量写入 ai_note
+type aiExpandedSearchMsg struct {
+	results []db.Bookmark
+	total   int
+	query   string // 用户原始查询词
+	err     error
+}
+
 // copyResultMsg 是复制完成后的消息（不触发 doSearch，避免消息被清掉）
 type copyResultMsg struct {
 	message string
@@ -294,6 +306,7 @@ func (m Model) doAIExpand() tea.Cmd {
 }
 
 func (m Model) doExpandedSearch(keywords []string) tea.Cmd {
+	query := m.query // 捕获用户原始查询词
 	return func() tea.Msg {
 		seen := make(map[string]bool)
 		var allResults []db.Bookmark
@@ -311,7 +324,17 @@ func (m Model) doExpandedSearch(keywords []string) tea.Cmd {
 			}
 		}
 
-		return searchResultMsg{results: allResults, total: len(allResults), err: nil}
+		return aiExpandedSearchMsg{results: allResults, total: len(allResults), query: query}
+	}
+}
+
+// doBatchAppendAINote 批量追加查询词到命中书签的 ai_note
+func (m Model) doBatchAppendAINote(bookmarks []db.Bookmark, query string) tea.Cmd {
+	return func() tea.Msg {
+		for _, bm := range bookmarks {
+			_ = db.AppendAINote(m.db, bm.ID, query)
+		}
+		return nil
 	}
 }
 
@@ -417,11 +440,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.results = msg.results
 		m.total = msg.total
 		m.message = ""
+		// 重置 AI expand 状态
+		m.aiExpanded = false
+		m.aiExpandQuery = ""
+		m.irrelevantSet = nil
 		// 删除后光标可能越界，修正
 		if m.cursor >= len(m.results) && len(m.results) > 0 {
 			m.cursor = len(m.results) - 1
 		}
 		return m, nil
+
+	case aiExpandedSearchMsg:
+		if msg.err != nil {
+			m.message = fmt.Sprintf("Search failed: %v", msg.err)
+			m.isError = true
+			return m, nil
+		}
+		m.results = msg.results
+		m.total = msg.total
+		m.aiExpandQuery = msg.query
+		// 重置不相关集合
+		m.irrelevantSet = make(map[string]bool)
+		// 批量写入 ai_note（后台执行，不阻塞 UI）
+		return m, m.doBatchAppendAINote(msg.results, msg.query)
 
 	case openResultMsg:
 		if msg.err != nil {
@@ -471,8 +512,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 			return m, nil
 		}
-		// 用展开的关键词搜索，合并去重
-		m.message = fmt.Sprintf("AI: %s", strings.Join(msg.keywords, ", "))
+		// AI expanded 提示 + 标记不相关操作提示
+		m.aiExpanded = true
+		m.message = "AI expanded, [x] to mark irrelevant"
 		m.isError = false
 		return m, m.doExpandedSearch(msg.keywords)
 

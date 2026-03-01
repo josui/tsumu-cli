@@ -28,8 +28,15 @@ func (m Model) View() string {
 		}
 	} else {
 		header = fmt.Sprintf("tsumu %s", m.query)
-		// AI expand 提示紧跟搜索词，比放在 help 栏更醒目
-		if m.cfg.AI.IsConfigured() {
+		if m.aiExpanded {
+			header += "  AI expanded, [x] to mark irrelevant"
+		} else if len(m.results) > 0 {
+			hint := ""
+			if m.cfg.AI.IsConfigured() {
+				hint = "[⇥ AI]  "
+			}
+			header += "  " + hint + "[x] irrelevant"
+		} else if m.cfg.AI.IsConfigured() {
 			header += "  [⇥ AI]"
 		}
 	}
@@ -524,7 +531,9 @@ func (m Model) renderDefault(idx int, bm *db.Bookmark, isFocused bool) string {
 
 	titleText := truncate(bm.Title, titleMax)
 	var title string
-	if isFocused {
+	if m.irrelevantSet[bm.ID] {
+		title = dimTitleStyle.Render(titleText)
+	} else if isFocused {
 		title = focusTitleStyle.Render(titleText)
 	} else {
 		title = titleStyle.Render(titleText)

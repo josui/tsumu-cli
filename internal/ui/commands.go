@@ -414,3 +414,26 @@ func (m Model) doSync(force bool) tea.Cmd {
 		return syncDoneMsg{result: result, warning: result.Warning}
 	}
 }
+
+// doToggleIrrelevant 切换当前书签的不相关状态。
+// 标记为不相关时从 ai_note 移除查询词，取消标记时重新追加。
+func (m Model) doToggleIrrelevant() tea.Cmd {
+	bm := m.focusedBookmark()
+	if bm == nil {
+		return nil
+	}
+	id := bm.ID
+	query := m.query
+	wasIrrelevant := m.irrelevantSet[id]
+
+	return func() tea.Msg {
+		if wasIrrelevant {
+			// 取消标记：重新追加查询词
+			_ = db.AppendAINote(m.db, id, query)
+		} else {
+			// 标记不相关：从 ai_note 移除查询词
+			_ = db.RemoveFromAINote(m.db, id, query)
+		}
+		return nil
+	}
+}
