@@ -149,6 +149,9 @@ func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, last
 		return err // API 级错误
 	}
 
+	// 记录被变更的 bookmark_id，pull 完成后刷新 tags_text
+	affectedBmIDs := make(map[string]bool)
+
 	for _, row := range res.Rows {
 		if len(row) < 4 {
 			continue
@@ -164,15 +167,35 @@ func pullBookmarkTags(ctx context.Context, localDB *sql.DB, client *Client, last
 			bmID, tagID).Scan(&localUpdatedAt)
 
 		if qErr == sql.ErrNoRows {
-			localDB.Exec(
+			_, err := localDB.Exec(
 				`INSERT INTO bookmark_tags (bookmark_id, tag_id, updated_at, deleted_at) VALUES (?, ?, ?, ?)`,
 				bmID, tagID, updatedAt, deletedAt)
+			if err == nil {
+				affectedBmIDs[bmID] = true
+			}
 		} else if qErr == nil && updatedAt > localUpdatedAt {
-			localDB.Exec(
+			_, err := localDB.Exec(
 				`UPDATE bookmark_tags SET updated_at = ?, deleted_at = ? WHERE bookmark_id = ? AND tag_id = ?`,
 				updatedAt, deletedAt, bmID, tagID)
+			if err == nil {
+				affectedBmIDs[bmID] = true
+			}
 		}
 	}
+
+	// 刷新被影响的 bookmark 的 tags_text 冗余字段，使 FTS5 索引保持一致。
+	// 不更新 updated_at，避免产生假变更触发下次 push 反推。
+	for bmID := range affectedBmIDs {
+		localDB.Exec(
+			`UPDATE bookmarks SET tags_text = (
+				SELECT COALESCE(GROUP_CONCAT(t.name, ','), '')
+				FROM bookmark_tags bt
+				JOIN tags t ON bt.tag_id = t.id
+				WHERE bt.bookmark_id = ? AND bt.deleted_at IS NULL
+			) WHERE id = ?`,
+			bmID, bmID)
+	}
+
 	return nil
 }
 
