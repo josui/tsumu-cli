@@ -219,7 +219,7 @@ func Fetch(rawURL string) (*Metadata, error) {
 	meta := &Metadata{}
 
 	// --- 提取 title ---
-	// 优先级：og:title > <title>
+	// 优先级：og:title > <title> > headless browser > URL path
 	meta.Title = getMetaProperty(doc, "og:title")
 	if meta.Title == "" {
 		meta.Title = strings.TrimSpace(doc.Find("title").First().Text())
@@ -235,6 +235,22 @@ func Fetch(rawURL string) (*Metadata, error) {
 	// --- 提取 site_name ---
 	// 统一使用域名，保证 TUI 显示一致
 	meta.SiteName = extractDomain(rawURL)
+
+	// --- Fallback：SPA / CSR 站点标题抓取 ---
+	// HTTP fetch 拿不到标题时，尝试无头浏览器渲染后获取 document.title，
+	// 再不行则从 URL 路径生成可读标题，确保标题永远不为空。
+	if meta.Title == "" {
+		if headlessTitle, err := fetchHeadlessTitle(rawURL); err == nil {
+			meta.Title = headlessTitle
+		}
+	}
+	if meta.Title == "" {
+		meta.Title = titleFromPath(rawURL)
+	}
+	if meta.Title == "" {
+		// 最终兜底：域名本身
+		meta.Title = meta.SiteName
+	}
 
 	return meta, nil
 }
@@ -265,6 +281,40 @@ func getMetaName(doc *goquery.Document, name string) string {
 // ExtractDomain extracts and returns the domain from a URL, stripping www. prefix.
 func ExtractDomain(rawURL string) string {
 	return extractDomain(rawURL)
+}
+
+// titleFromPath 从 URL 路径生成可读标题，作为最终 fallback。
+// 例如 "/colors/custom" → "Colors / Custom"
+// 例如 "/blog/my-awesome-post" → "Blog / My Awesome Post"
+// 空路径或仅 "/" 时返回空字符串。
+func titleFromPath(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+
+	path := strings.Trim(u.Path, "/")
+	if path == "" {
+		return ""
+	}
+
+	segments := strings.Split(path, "/")
+	var parts []string
+	for _, seg := range segments {
+		// 将连字符和下划线替换为空格，然后首字母大写
+		seg = strings.ReplaceAll(seg, "-", " ")
+		seg = strings.ReplaceAll(seg, "_", " ")
+		// 首字母大写每个单词
+		words := strings.Fields(seg)
+		for i, w := range words {
+			if len(w) > 0 {
+				words[i] = strings.ToUpper(w[:1]) + w[1:]
+			}
+		}
+		parts = append(parts, strings.Join(words, " "))
+	}
+
+	return strings.Join(parts, " / ")
 }
 
 // extractDomain 从 URL 中提取域名，去掉 www. 前缀。
