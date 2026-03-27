@@ -11,12 +11,18 @@ import (
 	"github.com/josui/tsumu-cli/internal/db"
 )
 
-var flagAI bool
+var (
+	flagAI   bool
+	flagSync bool
+)
 
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Configure tsumu settings",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if flagSync {
+			return runSyncSetup()
+		}
 		if flagAI {
 			return RunConfigAI()
 		}
@@ -26,6 +32,7 @@ var configCmd = &cobra.Command{
 
 func init() {
 	configCmd.Flags().BoolVar(&flagAI, "ai", false, "configure AI enhancement provider")
+	configCmd.Flags().BoolVar(&flagSync, "sync", false, "configure cloud sync (Turso)")
 }
 
 // RunConfigAI runs the interactive AI configuration flow.
@@ -39,26 +46,15 @@ func RunConfigAI() error {
 	fmt.Println("  Provider: Gemini (Google AI)")
 	fmt.Println("  Features: description generation, tag suggestion, query expansion")
 	fmt.Println()
-	fmt.Println("  推荐使用环境变量配置 API key:")
-	fmt.Println("    export TSUMU_AI_API_KEY=\"your-api-key\"")
-	fmt.Println()
-
-	// 检查环境变量是否已设置
-	envKey := os.Getenv("TSUMU_AI_API_KEY")
-	var key string
-	if envKey != "" {
-		fmt.Printf("  ✓ TSUMU_AI_API_KEY detected (***%s)\n", envKey[max(0, len(envKey)-4):])
-		fmt.Print("  Save to config.toml too? (leave blank to skip): ")
-		key, _ = reader.ReadString('\n')
-		key = strings.TrimSpace(key)
-		// 即使用户跳过，环境变量也够用
-	} else {
-		fmt.Print("  Gemini API Key: ")
-		key, _ = reader.ReadString('\n')
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return fmt.Errorf("API key is required. Set TSUMU_AI_API_KEY or enter here")
-		}
+	// 已有 key 时显示掩码
+	if existing := Cfg.AI.APIKey; existing != "" {
+		fmt.Printf("  Current API key: ***%s\n", existing[max(0, len(existing)-4):])
+	}
+	fmt.Print("  Gemini API Key (leave blank to keep current): ")
+	key, _ := reader.ReadString('\n')
+	key = strings.TrimSpace(key)
+	if key == "" && Cfg.AI.APIKey == "" {
+		return fmt.Errorf("API key is required")
 	}
 	Cfg.AI.Provider = "gemini"
 	if key != "" {
@@ -82,6 +78,10 @@ func RunConfigAI() error {
 		Cfg.AI.Lang = lang
 	}
 
+	// 敏感信息（API key）写入 .env，其余写入 config.toml
+	if err := Cfg.SaveEnv(); err != nil {
+		return fmt.Errorf("save .env: %w", err)
+	}
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}

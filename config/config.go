@@ -46,34 +46,25 @@ func (c *Config) GetPageSize() int {
 // SyncConfig 是 Turso 云端同步配置（Phase 4）。
 type SyncConfig struct {
 	Enabled    bool   `toml:"enabled"`
-	URL        string `toml:"url"`
-	AuthToken  string `toml:"auth_token"`
+	URL        string `toml:"-"` // 敏感字段，存储在 .env 中
+	AuthToken  string `toml:"-"` // 敏感字段，存储在 .env 中
 	Interval   string `toml:"interval,omitempty"`
 	LastSynced string `toml:"last_synced,omitempty"`
 }
 
-// GetURL 返回 Turso sync URL。优先级：环境变量 TSUMU_SYNC_URL > config.toml。
+// GetURL 返回 Turso sync URL。
 func (s *SyncConfig) GetURL() string {
-	if v := os.Getenv("TSUMU_SYNC_URL"); v != "" {
-		return v
-	}
 	return s.URL
 }
 
-// GetAuthToken 返回 Turso auth token。优先级：环境变量 TSUMU_SYNC_AUTH_TOKEN > config.toml。
+// GetAuthToken 返回 Turso auth token。
 func (s *SyncConfig) GetAuthToken() string {
-	if v := os.Getenv("TSUMU_SYNC_AUTH_TOKEN"); v != "" {
-		return v
-	}
 	return s.AuthToken
 }
 
-// IsEnabled 判断 sync 是否启用。环境变量有 URL 时自动视为 enabled。
+// IsEnabled 判断 sync 是否启用。URL 非空时自动视为 enabled。
 func (s *SyncConfig) IsEnabled() bool {
-	if os.Getenv("TSUMU_SYNC_URL") != "" {
-		return true
-	}
-	return s.Enabled
+	return s.Enabled || s.URL != ""
 }
 
 // CanSync 判断是否可以执行同步。
@@ -127,7 +118,7 @@ func (s *SyncConfig) NeedsSync() bool {
 // Provider + APIKey 用于所有 AI 功能；GenModel 用于 text generation，Model/Dimension 预留给 embedding。
 type AIConfig struct {
 	Provider  string `toml:"provider"`             // "gemini" | "ollama"
-	APIKey    string `toml:"api_key"`               // gemini 需要 API key
+	APIKey    string `toml:"-"`                      // 敏感字段，存储在 .env 中
 	GenModel  string `toml:"gen_model,omitempty"`    // text generation 模型，默认 "gemini-3-flash"
 	Lang      string `toml:"lang,omitempty"`         // ai_note 语言，逗号分隔（如 "zh,en"）。默认 "en"
 	Model     string `toml:"model,omitempty"`        // embedding 模型名（预留）
@@ -163,11 +154,8 @@ func (a *AIConfig) GetProvider() string {
 	return ""
 }
 
-// GetAPIKey 返回 API key。优先级：环境变量 TSUMU_AI_API_KEY > config.toml。
+// GetAPIKey 返回 API key。
 func (a *AIConfig) GetAPIKey() string {
-	if v := os.Getenv("TSUMU_AI_API_KEY"); v != "" {
-		return v
-	}
 	return a.APIKey
 }
 
@@ -179,12 +167,8 @@ func (a *AIConfig) GetDimension() int {
 	return a.Dimension
 }
 
-// GetGenModel 返回 text generation 模型名。
-// 优先级：环境变量 TSUMU_AI_GEN_MODEL > config.toml > 默认值 gemini-flash-latest。
+// GetGenModel 返回 text generation 模型名。默认 gemini-flash-latest。
 func (a *AIConfig) GetGenModel() string {
-	if v := os.Getenv("TSUMU_AI_GEN_MODEL"); v != "" {
-		return v
-	}
 	if a.GenModel != "" {
 		return a.GenModel
 	}
@@ -245,6 +229,117 @@ func (c *Config) IsFirstRun() bool {
 // os.MkdirAll 是幂等的：目录已存在时不会报错。
 func (c *Config) EnsureDir() error {
 	return os.MkdirAll(c.Dir, 0755)
+}
+
+// EnvPath 返回 .env 文件的完整路径。
+func (c *Config) EnvPath() string {
+	return filepath.Join(c.Dir, ".env")
+}
+
+// LoadEnv 从 ~/.tsumu/.env 加载敏感配置（token、API key 等）。
+// .env 格式固定，仅识别 TSUMU_* 开头的已知 key，直接写入 Config 字段。
+// 应在 Load 之后调用。
+// .env 文件不存在时，尝试从旧 config.toml 迁移敏感字段。
+func (c *Config) LoadEnv() error {
+	data, err := os.ReadFile(c.EnvPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c.migrateFromToml()
+		}
+		return err
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		// 去掉引号包裹
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1]
+		}
+
+		switch key {
+		case "TSUMU_SYNC_URL":
+			c.Sync.URL = val
+		case "TSUMU_SYNC_AUTH_TOKEN":
+			c.Sync.AuthToken = val
+		case "TSUMU_AI_API_KEY":
+			c.AI.APIKey = val
+		}
+	}
+	return nil
+}
+
+// migrateFromToml 从旧 config.toml 中提取敏感字段并迁移到 .env。
+// toml struct tag 为 "-" 后 Load() 不再读取这些字段，需要手动解析。
+// 迁移完成后自动创建 .env，后续启动直接读 .env。
+func (c *Config) migrateFromToml() error {
+	data, err := os.ReadFile(c.ConfigPath())
+	if err != nil {
+		return nil // config.toml 不存在或不可读，跳过迁移
+	}
+
+	// 用临时结构体解析 toml 中的敏感字段
+	var legacy struct {
+		Sync struct {
+			URL       string `toml:"url"`
+			AuthToken string `toml:"auth_token"`
+		} `toml:"sync"`
+		AI struct {
+			APIKey string `toml:"api_key"`
+		} `toml:"ai"`
+	}
+	if err := toml.Unmarshal(data, &legacy); err != nil {
+		return nil
+	}
+
+	// 有敏感字段才迁移
+	if legacy.Sync.URL == "" && legacy.Sync.AuthToken == "" && legacy.AI.APIKey == "" {
+		return nil
+	}
+
+	if legacy.Sync.URL != "" {
+		c.Sync.URL = legacy.Sync.URL
+	}
+	if legacy.Sync.AuthToken != "" {
+		c.Sync.AuthToken = legacy.Sync.AuthToken
+	}
+	if legacy.AI.APIKey != "" {
+		c.AI.APIKey = legacy.AI.APIKey
+	}
+
+	return c.SaveEnv()
+}
+
+// SaveEnv 将敏感配置写入 ~/.tsumu/.env。
+// 只写入非空字段，文件权限 0600（仅 owner 可读写）。
+func (c *Config) SaveEnv() error {
+	if err := c.EnsureDir(); err != nil {
+		return err
+	}
+
+	var b strings.Builder
+	b.WriteString("# tsumu environment — sensitive config (tokens, API keys)\n")
+	b.WriteString("# This file is loaded automatically on startup.\n\n")
+
+	if c.Sync.URL != "" {
+		fmt.Fprintf(&b, "TSUMU_SYNC_URL=\"%s\"\n", c.Sync.URL)
+	}
+	if c.Sync.AuthToken != "" {
+		fmt.Fprintf(&b, "TSUMU_SYNC_AUTH_TOKEN=\"%s\"\n", c.Sync.AuthToken)
+	}
+	if c.AI.APIKey != "" {
+		fmt.Fprintf(&b, "TSUMU_AI_API_KEY=\"%s\"\n", c.AI.APIKey)
+	}
+
+	return os.WriteFile(c.EnvPath(), []byte(b.String()), 0600)
 }
 
 // Load 从 config.toml 读取配置。文件不存在时返回默认配置（不报错）。
@@ -326,24 +421,11 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# ============================================================\n")
 	fmt.Fprintf(w, "# Setup: tsumu sync --setup\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# Environment variables (recommended, avoids plain-text tokens):\n")
-	fmt.Fprintf(w, "#   export TSUMU_SYNC_URL=\"libsql://your-db.turso.io\"\n")
-	fmt.Fprintf(w, "#   export TSUMU_SYNC_AUTH_TOKEN=\"your-token\"\n")
-	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# Priority: env var > config.toml\n")
+	fmt.Fprintf(w, "# Sensitive config (URL, token) is stored in ~/.tsumu/.env\n")
+	fmt.Fprintf(w, "# Run `tsumu sync --setup` to configure.\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[sync]\n")
 	fmt.Fprintf(w, "enabled = %t\n", c.Sync.Enabled)
-	if c.Sync.URL != "" {
-		fmt.Fprintf(w, "url = %q\n", c.Sync.URL)
-	} else {
-		fmt.Fprintf(w, "# url = \"libsql://your-db.turso.io\"  # prefer TSUMU_SYNC_URL env var\n")
-	}
-	if c.Sync.AuthToken != "" {
-		fmt.Fprintf(w, "auth_token = %q\n", c.Sync.AuthToken)
-	} else {
-		fmt.Fprintf(w, "# auth_token = \"your-token\"  # prefer TSUMU_SYNC_AUTH_TOKEN env var\n")
-	}
 	if c.Sync.Interval != "" {
 		fmt.Fprintf(w, "interval = %q\n", c.Sync.Interval)
 	} else {
@@ -360,22 +442,14 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	fmt.Fprintf(w, "# Provider: \"gemini\"\n")
 	fmt.Fprintf(w, "# Setup: tsumu config --ai\n")
 	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# Environment variables (recommended, avoids plain-text keys):\n")
-	fmt.Fprintf(w, "#   export TSUMU_AI_API_KEY=\"your-api-key\"\n")
-	fmt.Fprintf(w, "#   export TSUMU_AI_GEN_MODEL=\"gemini-flash-latest\"  # optional, default gemini-flash-latest\n")
-	fmt.Fprintf(w, "#\n")
-	fmt.Fprintf(w, "# Priority: env var > config.toml\n")
+	fmt.Fprintf(w, "# Sensitive config (API key) is stored in ~/.tsumu/.env\n")
+	fmt.Fprintf(w, "# Run `tsumu config --ai` to configure.\n")
 	fmt.Fprintf(w, "#\n")
 	fmt.Fprintf(w, "[ai]\n")
 	if c.AI.Provider != "" {
 		fmt.Fprintf(w, "provider = %q\n", c.AI.Provider)
 	} else {
 		fmt.Fprintf(w, "# provider = \"gemini\"\n")
-	}
-	if c.AI.APIKey != "" {
-		fmt.Fprintf(w, "api_key = %q\n", c.AI.APIKey)
-	} else {
-		fmt.Fprintf(w, "# api_key = \"your-api-key\"  # prefer TSUMU_AI_API_KEY env var\n")
 	}
 	if c.AI.GenModel != "" {
 		fmt.Fprintf(w, "gen_model = %q\n", c.AI.GenModel)

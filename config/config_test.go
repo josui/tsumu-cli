@@ -172,6 +172,150 @@ func TestAIConfig_GetModel(t *testing.T) {
 	}
 }
 
+func TestLoadEnv(t *testing.T) {
+	dir := t.TempDir()
+	envContent := `# tsumu environment variables
+TSUMU_SYNC_URL="libsql://test.turso.io"
+TSUMU_SYNC_AUTH_TOKEN="token-123"
+TSUMU_AI_API_KEY='my-api-key'
+
+# 空行和注释应被忽略
+INVALID_LINE_NO_EQUALS
+`
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(envContent), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg := &Config{Dir: dir}
+	if err := cfg.LoadEnv(); err != nil {
+		t.Fatalf("LoadEnv failed: %v", err)
+	}
+
+	if cfg.Sync.URL != "libsql://test.turso.io" {
+		t.Errorf("Sync.URL = %q, want %q", cfg.Sync.URL, "libsql://test.turso.io")
+	}
+	if cfg.Sync.AuthToken != "token-123" {
+		t.Errorf("Sync.AuthToken = %q, want %q", cfg.Sync.AuthToken, "token-123")
+	}
+	if cfg.AI.APIKey != "my-api-key" {
+		t.Errorf("AI.APIKey = %q, want %q", cfg.AI.APIKey, "my-api-key")
+	}
+}
+
+func TestLoadEnv_OverridesToml(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TSUMU_AI_API_KEY=\"from-dotenv\"\n"), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	cfg := &Config{Dir: dir, AI: AIConfig{APIKey: "from-toml"}}
+	if err := cfg.LoadEnv(); err != nil {
+		t.Fatalf("LoadEnv failed: %v", err)
+	}
+
+	if cfg.AI.APIKey != "from-dotenv" {
+		t.Errorf("AI.APIKey = %q, want %q (.env should override toml)", cfg.AI.APIKey, "from-dotenv")
+	}
+}
+
+func TestSaveEnvRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Dir: dir,
+		Sync: SyncConfig{
+			URL:       "libsql://my-db.turso.io",
+			AuthToken: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.test-token",
+		},
+		AI: AIConfig{APIKey: "AIzaSy-test-key_123"},
+	}
+	if err := cfg.SaveEnv(); err != nil {
+		t.Fatalf("SaveEnv failed: %v", err)
+	}
+
+	// 重新加载，验证 round-trip
+	loaded := &Config{Dir: dir}
+	if err := loaded.LoadEnv(); err != nil {
+		t.Fatalf("LoadEnv failed: %v", err)
+	}
+
+	if loaded.Sync.URL != cfg.Sync.URL {
+		t.Errorf("Sync.URL = %q, want %q", loaded.Sync.URL, cfg.Sync.URL)
+	}
+	if loaded.Sync.AuthToken != cfg.Sync.AuthToken {
+		t.Errorf("Sync.AuthToken = %q, want %q", loaded.Sync.AuthToken, cfg.Sync.AuthToken)
+	}
+	if loaded.AI.APIKey != cfg.AI.APIKey {
+		t.Errorf("AI.APIKey = %q, want %q", loaded.AI.APIKey, cfg.AI.APIKey)
+	}
+
+	// 验证文件权限 0600
+	info, err := os.Stat(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatalf("stat .env: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf(".env permissions = %o, want 0600", perm)
+	}
+}
+
+func TestLoadEnv_MigrateFromToml(t *testing.T) {
+	dir := t.TempDir()
+	// 模拟旧版 config.toml 含敏感字段
+	oldToml := `[sync]
+enabled = true
+url = "libsql://old.turso.io"
+auth_token = "old-token"
+interval = "24h"
+
+[ai]
+provider = "gemini"
+api_key = "old-api-key"
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(oldToml), 0644); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	// .env 不存在，LoadEnv 应自动迁移
+	cfg := &Config{Dir: dir}
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if err := cfg.LoadEnv(); err != nil {
+		t.Fatalf("LoadEnv migration failed: %v", err)
+	}
+
+	// 验证 .env 已自动创建
+	if _, err := os.Stat(filepath.Join(dir, ".env")); err != nil {
+		t.Fatalf(".env should be created by migration: %v", err)
+	}
+
+	// 验证敏感字段已迁移到 Config
+	if cfg.Sync.URL != "libsql://old.turso.io" {
+		t.Errorf("migrated URL = %q, want %q", cfg.Sync.URL, "libsql://old.turso.io")
+	}
+	if cfg.Sync.AuthToken != "old-token" {
+		t.Errorf("migrated AuthToken = %q, want %q", cfg.Sync.AuthToken, "old-token")
+	}
+	if cfg.AI.APIKey != "old-api-key" {
+		t.Errorf("migrated APIKey = %q, want %q", cfg.AI.APIKey, "old-api-key")
+	}
+
+	// 验证 round-trip: 新实例 Load + LoadEnv 能读到
+	loaded := &Config{Dir: dir}
+	loaded.Load()
+	loaded.LoadEnv()
+	if loaded.Sync.URL != "libsql://old.turso.io" {
+		t.Errorf("after round-trip URL = %q, want %q", loaded.Sync.URL, "libsql://old.turso.io")
+	}
+}
+
+func TestLoadEnv_FileNotExist(t *testing.T) {
+	cfg := &Config{Dir: t.TempDir()}
+	if err := cfg.LoadEnv(); err != nil {
+		t.Fatalf("LoadEnv should not error on missing .env: %v", err)
+	}
+}
+
 func TestSaveLoadWithNewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &Config{

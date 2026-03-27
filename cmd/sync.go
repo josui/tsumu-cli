@@ -158,20 +158,6 @@ func runSyncSetup() error {
 	}
 
 	if url == "" {
-		// 检查环境变量是否已设置
-		envURL := os.Getenv("TSUMU_SYNC_URL")
-		envToken := os.Getenv("TSUMU_SYNC_AUTH_TOKEN")
-
-		if envURL != "" {
-			fmt.Printf("  ✓ TSUMU_SYNC_URL detected (%s)\n", envURL)
-		}
-		if envToken != "" {
-			fmt.Printf("  ✓ TSUMU_SYNC_AUTH_TOKEN detected (***%s)\n", envToken[max(0, len(envToken)-4):])
-		}
-		fmt.Println()
-		fmt.Println("  Leave blank to use environment variables.")
-		fmt.Println()
-
 		fmt.Print("  Turso database URL: ")
 		input, _ := reader.ReadString('\n')
 		url = strings.TrimSpace(input)
@@ -179,39 +165,27 @@ func runSyncSetup() error {
 		fmt.Print("  Auth token: ")
 		input, _ = reader.ReadString('\n')
 		token = strings.TrimSpace(input)
+
+		if url == "" || token == "" {
+			return fmt.Errorf("URL and auth token are required")
+		}
 	}
 
-	// 只有用户实际输入了值才写入 config（空值 = 用环境变量）
-	if url != "" {
-		Cfg.Sync.URL = url
-	}
-	if token != "" {
-		Cfg.Sync.AuthToken = token
-	}
+	Cfg.Sync.URL = url
+	Cfg.Sync.AuthToken = token
 	Cfg.Sync.Enabled = true
 	Cfg.Sync.Interval = "24h"
+	// 敏感信息（URL、token）写入 .env，其余写入 config.toml
+	if err := Cfg.SaveEnv(); err != nil {
+		return fmt.Errorf("failed to save .env: %w", err)
+	}
 	if err := Cfg.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// 用 GetURL/GetAuthToken 获取实际值（含环境变量 fallback）
-	actualURL := Cfg.Sync.GetURL()
-	actualToken := Cfg.Sync.GetAuthToken()
-
-	// 环境变量也没有 → 提示用户设置，跳过首次同步
-	if actualURL == "" || actualToken == "" {
-		fmt.Println()
-		fmt.Println("  ✓ Sync enabled. Set environment variables to start syncing:")
-		fmt.Println()
-		fmt.Println("    export TSUMU_SYNC_URL=\"libsql://your-db.turso.io\"")
-		fmt.Println("    export TSUMU_SYNC_AUTH_TOKEN=\"your-token\"")
-		fmt.Println()
-		return nil
-	}
-
 	// 首次同步：全量 pull + push
 	fmt.Println("  Syncing...")
-	client := sync.NewClient(actualURL, actualToken)
+	client := sync.NewClient(Cfg.Sync.URL, Cfg.Sync.AuthToken)
 	ctx := context.Background()
 	result, err := sync.SyncAll(ctx, Store.DB, client, "", sync.SyncIncremental, nil)
 	if err == nil {

@@ -19,21 +19,26 @@ func main() {
 	// 1. 加载配置
 	cfg := config.Default()
 	if err := cfg.EnsureDir(); err != nil {
-		fmt.Fprintf(os.Stderr, "创建数据目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create data directory: %v\n", err)
 		os.Exit(1)
 	}
 	// 首次运行检测（在 Load 之前，因为 Load 不会报错如果文件不存在）
 	firstRun := cfg.IsFirstRun()
 
 	if err := cfg.Load(); err != nil {
-		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
+	}
+
+	// .env 在 Load 之后加载，覆盖 config.toml 中的敏感字段
+	if err := cfg.LoadEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load .env: %v\n", err)
 	}
 
 	if firstRun {
 		// 写入默认配置（标记为非首次运行）
 		if err := cfg.Save(); err != nil {
-			fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to save config: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -42,7 +47,7 @@ func main() {
 			// 先打开本地 DB（sync setup 需要），然后走 sync setup 流程
 			store, err := db.OpenStore(cfg.DBPath())
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Failed to initialize database: %v\n", err)
 				os.Exit(1)
 			}
 			cmd.Store = store
@@ -54,8 +59,11 @@ func main() {
 			store.Close()
 			// setup 完成后重新加载配置（可能已切换到 sync 模式）
 			if err := cfg.Load(); err != nil {
-				fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 				os.Exit(1)
+			}
+			if err := cfg.LoadEnv(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to load .env: %v\n", err)
 			}
 		}
 	}
@@ -63,7 +71,7 @@ func main() {
 	// 2. 打开数据库（本地模式）
 	store, err := db.OpenStore(cfg.DBPath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "数据库初始化失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to initialize database: %v\n", err)
 		os.Exit(1)
 	}
 	defer store.Close()
@@ -73,17 +81,16 @@ func main() {
 	if cfg.Sync.CanSync() && cfg.Sync.NeedsSync() {
 		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
 		result, err := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, sync.SyncIncremental, nil)
-		if err == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠ Auto-sync failed: %v\n", err)
+		} else {
 			cfg.Sync.LastSynced = sync.NowUTC()
 			cfg.Save()
-		} else {
-			fmt.Fprintf(os.Stderr, "  ⚠ Auto-sync failed: %v\n", err)
-		}
-
-		pulled := result.PulledNew + result.PulledUpdated
-		pushed := result.PushedNew + result.PushedUpdated
-		if pulled > 0 || pushed > 0 {
-			fmt.Printf("  ⟳ Auto-synced: pulled %d, pushed %d\n", pulled, pushed)
+			pulled := result.PulledNew + result.PulledUpdated
+			pushed := result.PushedNew + result.PushedUpdated
+			if pulled > 0 || pushed > 0 {
+				fmt.Printf("  ⟳ Auto-synced: pulled %d, pushed %d\n", pulled, pushed)
+			}
 		}
 	}
 

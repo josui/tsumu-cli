@@ -153,42 +153,42 @@ func (c *Client) Execute(ctx context.Context, stmts []Stmt) ([]ExecuteResult, er
 
 	body, err := json.Marshal(pipelineRequest{Requests: reqs})
 	if err != nil {
-		return nil, fmt.Errorf("序列化请求失败: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	url := c.baseURL + "/v2/pipeline"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.authToken)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var pResp pipelineResponse
 	if err := json.Unmarshal(respBody, &pResp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	// 提取执行结果（跳过最后的 close 响应）
 	var results []ExecuteResult
 	for _, r := range pResp.Results {
 		if r.Type == "error" && r.Error != nil {
-			return nil, fmt.Errorf("远端 SQL 错误: %s (code: %s)", r.Error.Message, r.Error.Code)
+			return nil, fmt.Errorf("remote SQL error: %s (code: %s)", r.Error.Message, r.Error.Code)
 		}
 		if r.Response != nil && r.Response.Type == "execute" {
 			results = append(results, r.Response.Result)
@@ -205,7 +205,7 @@ func (c *Client) ExecuteOne(ctx context.Context, sql string, args ...Arg) (*Exec
 		return nil, err
 	}
 	if len(results) == 0 {
-		return nil, fmt.Errorf("无执行结果")
+		return nil, fmt.Errorf("no execution result")
 	}
 	return &results[0], nil
 }
