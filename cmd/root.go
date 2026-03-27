@@ -27,8 +27,8 @@ var Store *db.Store
 var Cfg *config.Config
 
 var rootCmd = &cobra.Command{
-	Use:   "tsumu [query]",
-	Short: "tsumu — local-first CLI bookmark manager",
+	Use:     "tsumu [query]",
+	Short:   "tsumu — local-first CLI bookmark manager",
 	Long: `tsumu — local-first CLI bookmark manager.
 Save links fast, find them faster.
 
@@ -89,6 +89,7 @@ Manage:
 // addCmd is defined in add.go
 
 func Execute() {
+	rootCmd.Version = Version
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
