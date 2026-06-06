@@ -173,7 +173,7 @@ func TestSyncAll_APIFailure_ReturnsError(t *testing.T) {
 	defer server.Close()
 	client := NewClient(server.URL, "bad-token")
 
-	_, err := SyncAll(context.Background(), db, client, "", SyncIncremental, nil)
+	_, err := SyncAll(context.Background(), db, client, "", "", SyncIncremental, nil)
 	if err == nil {
 		t.Error("SyncAll should return error on API failure")
 	}
@@ -190,7 +190,7 @@ func TestSyncAll_Success_NoError(t *testing.T) {
 		return results
 	})
 
-	_, err := SyncAll(context.Background(), db, client, "", SyncIncremental, nil)
+	_, err := SyncAll(context.Background(), db, client, "", "", SyncIncremental, nil)
 	if err != nil {
 		t.Errorf("SyncAll should succeed, got: %v", err)
 	}
@@ -204,6 +204,9 @@ func TestPull_Incremental_NewAndLWW(t *testing.T) {
 
 	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
 		sql := stmts[0].SQL
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult(nil)} // backfill：无缺失
+		}
 		if strings.Contains(sql, "FROM bookmarks") {
 			return []resultWrapper{okResult([][]Value{
 				// bm1 远端更新
@@ -253,6 +256,9 @@ func TestPull_LWW_LocalNewer_NoOverwrite(t *testing.T) {
 
 	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
 		sql := stmts[0].SQL
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult(nil)} // backfill：无缺失
+		}
 		if strings.Contains(sql, "FROM bookmarks") {
 			return []resultWrapper{okResult([][]Value{
 				{v("bm1"), v("https://a.com"), v("Remote Title"), v(""), v(""), v(""),
@@ -370,7 +376,7 @@ func TestSyncAll_Overwrite_SkipsPull(t *testing.T) {
 		return results
 	})
 
-	_, err := SyncAll(context.Background(), db, client, "2025-12-01T00:00:00Z", SyncOverwrite, nil)
+	_, err := SyncAll(context.Background(), db, client, "2025-12-01T00:00:00Z", "2025-12-01T00:00:00Z", SyncOverwrite, nil)
 	if err != nil {
 		t.Fatalf("SyncAll Overwrite failed: %v", err)
 	}
@@ -396,12 +402,218 @@ func TestSyncAll_Full_PullsAndPushes(t *testing.T) {
 		return results
 	})
 
-	_, err := SyncAll(context.Background(), db, client, "2025-12-01T00:00:00Z", SyncFull, nil)
+	_, err := SyncAll(context.Background(), db, client, "2025-12-01T00:00:00Z", "2025-12-01T00:00:00Z", SyncFull, nil)
 	if err != nil {
 		t.Fatalf("SyncAll Full failed: %v", err)
 	}
 
 	if !pullCalled {
 		t.Error("SyncFull should execute pull")
+	}
+}
+
+func TestPull_BackfillMissingBookmark(t *testing.T) {
+	db := setupLocalDB(t)
+
+	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
+		sql := stmts[0].SQL
+		// backfill 的活跃 id 列表
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult([][]Value{{v("bm-old")}})}
+		}
+		// backfill 按 id 拉全行
+		if strings.Contains(sql, "FROM bookmarks") && strings.Contains(sql, "IN") {
+			return []resultWrapper{okResult([][]Value{
+				{v("bm-old"), v("https://old.com"), v("Old"), v("desc"), v("note"), v(""),
+					v(""), v(""), v("0"), v("0"), v("cli"),
+					v("2026-03-27T00:00:00Z"), v("2026-03-27T07:23:29Z"), vNull()},
+			})}
+		}
+		// 增量 pull：cursor 很晚，无新行
+		if strings.Contains(sql, "FROM bookmarks") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmark_tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		return []resultWrapper{okResult(nil)}
+	})
+
+	result, err := Pull(context.Background(), db, client, "2026-12-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+	if result.New != 1 {
+		t.Errorf("New = %d, want 1 (backfilled)", result.New)
+	}
+
+	var desc string
+	if err := db.QueryRow(`SELECT description FROM bookmarks WHERE id = 'bm-old'`).Scan(&desc); err != nil {
+		t.Fatalf("bm-old not backfilled: %v", err)
+	}
+	if desc != "desc" {
+		t.Errorf("description = %q, want 'desc' (标量列随行带回)", desc)
+	}
+	if result.MaxUpdatedAt != "2026-03-27T07:23:29Z" {
+		t.Errorf("MaxUpdatedAt = %q, want backfilled row's updated_at", result.MaxUpdatedAt)
+	}
+}
+
+func TestPull_BackfillMissingBookmarkTags(t *testing.T) {
+	db := setupLocalDB(t)
+
+	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
+		sql := stmts[0].SQL
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult([][]Value{{v("bm-old")}})}
+		}
+		if strings.Contains(sql, "FROM bookmarks") && strings.Contains(sql, "IN") {
+			return []resultWrapper{okResult([][]Value{
+				{v("bm-old"), v("https://old.com"), v("Old"), v(""), v(""), v(""),
+					v(""), v("design"), v("0"), v("0"), v("cli"),
+					v("2026-03-27T00:00:00Z"), v("2026-03-27T07:23:29Z"), vNull()},
+			})}
+		}
+		// backfill bookmark_tags：按 bookmark_id IN 拉关联
+		if strings.Contains(sql, "FROM bookmark_tags") && strings.Contains(sql, "IN") {
+			return []resultWrapper{okResult([][]Value{
+				{v("bm-old"), v("tag-design"), v("2026-03-27T07:23:29Z"), vNull()},
+			})}
+		}
+		if strings.Contains(sql, "FROM bookmarks") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		// 増量 pullBookmarkTags（無 IN）
+		if strings.Contains(sql, "FROM bookmark_tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		return []resultWrapper{okResult(nil)}
+	})
+
+	_, err := Pull(context.Background(), db, client, "2026-12-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM bookmark_tags WHERE bookmark_id = 'bm-old' AND tag_id = 'tag-design'`).Scan(&count)
+	if count != 1 {
+		t.Errorf("bookmark_tags for bm-old = %d, want 1 (関連随 backfill 補回)", count)
+	}
+}
+
+// TestPull_BackfillSkipsTombstone 验证 backfill 不会补回远端墓碑（deleted_at 非空）。
+// 关键在于 backfill 的候选 id 查询带 `WHERE deleted_at IS NULL`，墓碑根本不进候选集。
+func TestPull_BackfillSkipsTombstone(t *testing.T) {
+	db := setupLocalDB(t)
+
+	var idQueryHadActiveFilter bool
+	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
+		sql := stmts[0].SQL
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			// backfill 候选 id 查询必须只取活跃行
+			if strings.Contains(sql, "deleted_at IS NULL") {
+				idQueryHadActiveFilter = true
+			}
+			// 远端 bm-del 是墓碑 → 被 deleted_at IS NULL 过滤掉，返回空候选集
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmarks") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmark_tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		return []resultWrapper{okResult(nil)}
+	})
+
+	_, err := Pull(context.Background(), db, client, "2026-12-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+
+	if !idQueryHadActiveFilter {
+		t.Error("backfill id 候选查询应带 'deleted_at IS NULL' 过滤，墓碑不应进候选集")
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE id = 'bm-del'`).Scan(&count)
+	if count != 0 {
+		t.Errorf("墓碑 bm-del 不应被 backfill 补回，本地 count = %d, want 0", count)
+	}
+}
+
+func TestSyncAll_AdvancesPullCursor(t *testing.T) {
+	db := setupLocalDB(t)
+
+	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
+		sql := stmts[0].SQL
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmarks") && !strings.Contains(sql, "COUNT") && !strings.Contains(sql, "IN") {
+			return []resultWrapper{okResult([][]Value{
+				{v("bm1"), v("https://a.com"), v("A"), v(""), v(""), v(""),
+					v(""), v(""), v("0"), v("0"), v("cli"),
+					v("2026-01-01T00:00:00Z"), v("2026-04-10T01:48:42Z"), vNull()},
+			})}
+		}
+		var results []resultWrapper
+		for range stmts {
+			results = append(results, okResult(nil))
+		}
+		return results
+	})
+
+	result, err := SyncAll(context.Background(), db, client, "2026-06-06T00:00:00Z", "2026-01-01T00:00:00Z", SyncIncremental, nil)
+	if err != nil {
+		t.Fatalf("SyncAll failed: %v", err)
+	}
+	if result.NewPullCursor != "2026-04-10T01:48:42Z" {
+		t.Errorf("NewPullCursor = %q, want '2026-04-10T01:48:42Z'", result.NewPullCursor)
+	}
+}
+
+func TestPull_TracksMaxUpdatedAt(t *testing.T) {
+	db := setupLocalDB(t)
+
+	_, client := mockTursoServer(t, func(stmts []Stmt) []resultWrapper {
+		sql := stmts[0].SQL
+		// 注意：backfill 的 "SELECT id FROM bookmarks WHERE deleted_at IS NULL" 也含 "FROM bookmarks"，
+		// 必须先于通用 bookmarks 分支判断，返回空 id 列表（不触发 backfill）。
+		if strings.Contains(sql, "SELECT id FROM bookmarks") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmarks") {
+			return []resultWrapper{okResult([][]Value{
+				{v("bm1"), v("https://a.com"), v("A"), v(""), v(""), v(""),
+					v(""), v(""), v("0"), v("0"), v("cli"),
+					v("2026-01-01T00:00:00Z"), v("2026-04-02T04:20:56Z"), vNull()},
+			})}
+		}
+		if strings.Contains(sql, "FROM tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		if strings.Contains(sql, "FROM bookmark_tags") {
+			return []resultWrapper{okResult(nil)}
+		}
+		return []resultWrapper{okResult(nil)}
+	})
+
+	result, err := Pull(context.Background(), db, client, "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+	if result.MaxUpdatedAt != "2026-04-02T04:20:56Z" {
+		t.Errorf("MaxUpdatedAt = %q, want '2026-04-02T04:20:56Z'", result.MaxUpdatedAt)
 	}
 }

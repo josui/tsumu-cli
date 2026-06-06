@@ -402,13 +402,14 @@ func (m Model) doSync(force bool) tea.Cmd {
 			mode = sync.SyncFull
 		}
 
-		result, err := sync.SyncAll(ctx, database, client, cfg.Sync.LastSynced, mode, nil)
+		result, err := sync.SyncAll(ctx, database, client, cfg.Sync.LastSynced, cfg.Sync.PullCursor, mode, nil)
 		if err != nil {
 			return syncDoneMsg{err: err}
 		}
 
-		// 更新 config（last_synced）
+		// 更新 config（last_synced + pull_cursor）
 		cfg.Sync.LastSynced = sync.NowUTC()
+		cfg.Sync.PullCursor = result.NewPullCursor
 		cfg.Save()
 
 		return syncDoneMsg{result: result, warning: result.Warning}

@@ -80,11 +80,12 @@ func main() {
 	// 静默执行，失败不阻塞正常使用（仅输出警告）。
 	if cfg.Sync.CanSync() && cfg.Sync.NeedsSync() {
 		client := sync.NewClient(cfg.Sync.GetURL(), cfg.Sync.GetAuthToken())
-		result, err := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, sync.SyncIncremental, nil)
+		result, err := sync.SyncAll(context.Background(), store.DB, client, cfg.Sync.LastSynced, cfg.Sync.PullCursor, sync.SyncIncremental, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠ Auto-sync failed: %v\n", err)
 		} else {
 			cfg.Sync.LastSynced = sync.NowUTC()
+			cfg.Sync.PullCursor = result.NewPullCursor
 			cfg.Save()
 			pulled := result.PulledNew + result.PulledUpdated
 			pushed := result.PushedNew + result.PushedUpdated

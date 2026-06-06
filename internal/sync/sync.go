@@ -34,18 +34,21 @@ type Result struct {
 	PushedNew     int    // push 阶段新增的记录数
 	PushedUpdated int    // push 阶段更新的记录数
 	Warning       string // 同步后校验警告（计数不一致等）
+	NewPullCursor string // 同步后应写回 config 的 pull_cursor（Pull 出错或 overwrite 跳过则维持传入值）
 }
 
 // SyncAll 执行同步。
 // mode 决定同步方式：SyncIncremental（增量）、SyncFull（全量双向）、SyncOverwrite（本地覆盖远端）。
 // 返回 error 时调用方不应更新 last_synced。
-func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced string, mode SyncMode, onProgress func(string)) (Result, error) {
+func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced, pullCursor string, mode SyncMode, onProgress func(string)) (Result, error) {
 	var result Result
+	result.NewPullCursor = pullCursor // 默认维持不变（overwrite 跳过 pull 时）
 
-	// SyncFull / SyncOverwrite 时清空 lastSynced，触发全量处理
 	effectiveLastSynced := lastSynced
+	effectivePullCursor := pullCursor
 	if mode == SyncFull || mode == SyncOverwrite {
 		effectiveLastSynced = ""
+		effectivePullCursor = ""
 	}
 
 	// Pull 阶段（SyncOverwrite 跳过）
@@ -54,12 +57,14 @@ func SyncAll(ctx context.Context, localDB *sql.DB, client *Client, lastSynced st
 			onProgress("Pulling from remote...")
 		}
 
-		pullResult, err := Pull(ctx, localDB, client, effectiveLastSynced)
+		pullResult, err := Pull(ctx, localDB, client, effectivePullCursor)
 		if err != nil {
 			return result, fmt.Errorf("pull failed: %w", err)
 		}
 		result.PulledNew = pullResult.New
 		result.PulledUpdated = pullResult.Updated
+		// 推进 cursor：取传入值与本轮远端最大 updated_at 的较大者
+		result.NewPullCursor = maxStr(pullCursor, pullResult.MaxUpdatedAt)
 
 		if onProgress != nil {
 			onProgress(fmt.Sprintf("Pulled: %d new, %d updated", pullResult.New, pullResult.Updated))
@@ -115,4 +120,13 @@ func verifyCounts(ctx context.Context, localDB *sql.DB, client *Client) string {
 // NowUTC 返回当前 UTC 时间的 RFC3339 格式字符串。
 func NowUTC() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// maxStr 返回两个 RFC3339 时间戳中字典序较大者（即较新者）。
+// 空字符串视为最小。用于推进 pull cursor。
+func maxStr(a, b string) string {
+	if b > a {
+		return b
+	}
+	return a
 }

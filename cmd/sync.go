@@ -107,7 +107,7 @@ func runSyncManual() error {
 		fmt.Println("  Full resync: pull + push all data")
 	}
 
-	result, err := sync.SyncAll(ctx, Store.DB, client, Cfg.Sync.LastSynced, mode, func(msg string) {
+	result, err := sync.SyncAll(ctx, Store.DB, client, Cfg.Sync.LastSynced, Cfg.Sync.PullCursor, mode, func(msg string) {
 		fmt.Printf("\r  ⠋ %s", msg)
 	})
 
@@ -121,6 +121,7 @@ func runSyncManual() error {
 	}
 
 	Cfg.Sync.LastSynced = sync.NowUTC()
+	Cfg.Sync.PullCursor = result.NewPullCursor
 	Cfg.Save()
 
 	pulled := result.PulledNew + result.PulledUpdated
@@ -187,9 +188,10 @@ func runSyncSetup() error {
 	fmt.Println("  Syncing...")
 	client := sync.NewClient(Cfg.Sync.URL, Cfg.Sync.AuthToken)
 	ctx := context.Background()
-	result, err := sync.SyncAll(ctx, Store.DB, client, "", sync.SyncIncremental, nil)
+	result, err := sync.SyncAll(ctx, Store.DB, client, "", "", sync.SyncIncremental, nil)
 	if err == nil {
 		Cfg.Sync.LastSynced = sync.NowUTC()
+		Cfg.Sync.PullCursor = result.NewPullCursor
 		Cfg.Save()
 	} else {
 		fmt.Fprintf(os.Stderr, "  ⚠ Initial sync failed: %v\n", err)

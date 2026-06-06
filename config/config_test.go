@@ -342,3 +342,23 @@ func TestSaveLoadWithNewFields(t *testing.T) {
 		t.Errorf("LastSynced = %q, want %q", loaded.Sync.LastSynced, "2026-02-27T10:00:00Z")
 	}
 }
+
+func TestConfig_PullCursorRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	c := &Config{Dir: dir}
+	c.Sync.Enabled = true
+	c.Sync.LastSynced = "2026-06-06T12:05:26Z"
+	c.Sync.PullCursor = "2026-05-27T03:07:31Z"
+
+	if err := c.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	loaded := &Config{Dir: dir}
+	if err := loaded.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Sync.PullCursor != "2026-05-27T03:07:31Z" {
+		t.Errorf("PullCursor = %q, want '2026-05-27T03:07:31Z'", loaded.Sync.PullCursor)
+	}
+}

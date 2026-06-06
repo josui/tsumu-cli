@@ -49,7 +49,8 @@ type SyncConfig struct {
 	URL        string `toml:"-"` // 敏感字段，存储在 .env 中
 	AuthToken  string `toml:"-"` // 敏感字段，存储在 .env 中
 	Interval   string `toml:"interval,omitempty"`
-	LastSynced string `toml:"last_synced,omitempty"`
+	LastSynced string `toml:"last_synced,omitempty"` // 本机墙钟：管 push 过滤 + pending 计数 + UI 显示
+	PullCursor string `toml:"pull_cursor,omitempty"` // 远端数据高水位：上次 pull 到的远端最大 updated_at，仅用于 pull 过滤
 }
 
 // GetURL 返回 Turso sync URL。
@@ -433,6 +434,9 @@ func writeConfigTOML(w io.Writer, c *Config) error {
 	}
 	if c.Sync.LastSynced != "" {
 		fmt.Fprintf(w, "last_synced = %q\n", c.Sync.LastSynced)
+	}
+	if c.Sync.PullCursor != "" {
+		fmt.Fprintf(w, "pull_cursor = %q\n", c.Sync.PullCursor)
 	}
 
 	// ── ai ──
